@@ -2,39 +2,25 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from datetime import datetime
 #SQL database module
-from sqlalchemy import Column, Integer, Float, String, DateTime
-from database import Base
 from datetime import datetime
-from database import SessionLocal
-from sqlalchemy import Column, Integer, Float, String, DateTime
-from database import Base
+from database import SessionLocal, Base
 
 app = FastAPI()
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # OK during development
+    allow_origins=["*"],   # OK during development   
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-class MeasurementModel(Base):
-    __tablename__ = "measurements"
-
-    id = Column(Integer, primary_key=True, index=True)
-    device_id = Column(String)
-    weight = Column(Float)
-    battery = Column(Float)
-    timestamp = Column(DateTime)
-
+from schemas import Measurement
+import crud
 # Data model coming from Arduino
-from pydantic import BaseModel
+from database import engine
 
-class Measurement(BaseModel):
-    weight: float
-    battery_percentage: float
-    device_id: str | None = "Mysterious soldier"
+Base.metadata.create_all(bind=engine)
 
 @app.get("/health")
 def health():
@@ -57,47 +43,54 @@ def health():
 #New database insertion code
 
 
-
+#End point code
 @app.post("/measurements")
 def add_measurement(m: Measurement):
-    print("NEW DATA:", m)
 
     db = SessionLocal()
 
-    new_entry = MeasurementModel(
-        device_id=m.device_id,
-        weight=m.weight,
-        battery=m.battery_percentage,
-        timestamp=datetime.utcnow()
-    )
+    try:
 
-    db.add(new_entry)
-    db.commit()
-    db.close()
+        measurement = crud.create_measurement(db, m)
 
-    return {
-        "status": "stored",
-        "device_id": m.device_id
-    }
+        return {
+            "status": "stored",
+            "id": measurement.id,
+            "device_id": measurement.device_id
+        }
 
+    finally:
 
+        db.close()
+
+#Get code
 @app.get("/measurements")
 def get_measurements():
+
     db = SessionLocal()
 
-    measurements = db.query(MeasurementModel).all()
+    try:
 
-    result = []
+        measurements = crud.get_measurements(db)
 
-    for m in measurements:
-        result.append({
-            "id": m.id,
-            "device_id": m.device_id,
-            "weight": m.weight,
-            "battery": m.battery,
-            "timestamp": m.timestamp
-        })
+        return [
+            {
+                "id": m.id,
+                "device_id": m.device_id,
+                "weight": m.weight,
+                "battery": m.battery,
+                "timestamp": m.timestamp
+            }
+            for m in measurements
+        ]
 
-    db.close()
+    finally:
 
-    return result
+        db.close()
+
+@app.get("/")
+def root():
+    return {
+        "service": "Hoplite API",
+        "status": "running"
+    }
