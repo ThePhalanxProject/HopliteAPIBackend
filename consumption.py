@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 
@@ -22,11 +22,7 @@ def _to_utc(value: datetime) -> datetime:
 
 
 def calculate_consumption(measurements: List[object], empty_threshold_g: float = 50.0) -> ConsumptionPrediction:
-    """Estimate daily consumption from historical weight readings using linear regression.
-
-    The calculation is deliberately deterministic for the MVP. The AI agent receives the
-    resulting numbers; it does not calculate consumption or decide the warning threshold.
-    """
+    """Estimate daily consumption from historical weight readings using linear regression."""
     if not measurements:
         raise ValueError("No measurements available")
 
@@ -34,7 +30,6 @@ def calculate_consumption(measurements: List[object], empty_threshold_g: float =
         [m for m in measurements if m.timestamp is not None and m.weight is not None],
         key=lambda m: _to_utc(m.timestamp),
     )
-
     if not points:
         raise ValueError("No valid measurements available")
 
@@ -55,7 +50,6 @@ def calculate_consumption(measurements: List[object], empty_threshold_g: float =
 
     first_time = _to_utc(points[0].timestamp)
     span_days = (latest_time - first_time).total_seconds() / 86400.0
-
     if span_days <= 0:
         return ConsumptionPrediction(
             device_id=latest.device_id,
@@ -68,18 +62,16 @@ def calculate_consumption(measurements: List[object], empty_threshold_g: float =
             data_span_days=0.0,
         )
 
-    # Ordinary least-squares slope of weight versus time (grams/day).
-    x = [( _to_utc(m.timestamp) - first_time).total_seconds() / 86400.0 for m in points]
+    x = [(_to_utc(m.timestamp) - first_time).total_seconds() / 86400.0 for m in points]
     y = [float(m.weight) for m in points]
     x_mean = sum(x) / len(x)
     y_mean = sum(y) / len(y)
     denominator = sum((value - x_mean) ** 2 for value in x)
-
-    if denominator == 0:
-        slope = 0.0
-    else:
-        slope = sum((x[i] - x_mean) * (y[i] - y_mean) for i in range(len(points))) / denominator
-
+    slope = (
+        sum((x[i] - x_mean) * (y[i] - y_mean) for i in range(len(points))) / denominator
+        if denominator
+        else 0.0
+    )
     consumption_rate = max(0.0, -slope)
 
     if consumption_rate <= 0 or float(latest.weight) <= empty_threshold_g:
@@ -88,9 +80,8 @@ def calculate_consumption(measurements: List[object], empty_threshold_g: float =
     else:
         usable_weight = max(0.0, float(latest.weight) - empty_threshold_g)
         days_remaining = usable_weight / consumption_rate
-        runout = latest_time + __import__('datetime').timedelta(days=days_remaining)
+        runout = latest_time + timedelta(days=days_remaining)
 
-    # Simple MVP confidence: more readings and a longer observation window increase confidence.
     sample_factor = min(1.0, len(points) / 20.0)
     span_factor = min(1.0, span_days / 7.0)
     confidence = round(0.2 + 0.4 * sample_factor + 0.4 * span_factor, 2)
