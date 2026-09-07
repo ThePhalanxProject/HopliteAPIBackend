@@ -13,14 +13,9 @@ class AgentError(RuntimeError):
 
 
 def call_hoplite_agent(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Call the Hostman/Kimi agent if configured.
-
-    The API remains usable without the agent configuration; in that case the endpoint
-    returns the deterministic prediction and no AI notification is generated.
-    """
+    """Call the Hostman/Kimi agent if configured."""
     access_id = os.getenv("HOSTMAN_AGENT_ACCESS_ID")
     bearer_token = os.getenv("HOSTMAN_AGENT_BEARER_TOKEN")
-
     if not access_id or not bearer_token:
         return None
 
@@ -39,20 +34,24 @@ def call_hoplite_agent(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         f"BACKEND_DATA:\n{json.dumps(payload, default=str)}"
     )
 
-    response = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {bearer_token}",
-            "Content-Type": "application/json",
-        },
-        json={"message": prompt},
-        timeout=20,
-    )
-    response.raise_for_status()
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {bearer_token}",
+                "Content-Type": "application/json",
+            },
+            json={"message": prompt},
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise AgentError(f"Hostman agent request failed: {exc}") from exc
 
-    data = response.json()
-    # Hostman may return the agent answer under different envelope keys.
-    candidate = data.get("response", data.get("message", data)) if isinstance(data, dict) else data
+    # Hostman returns the agent answer in the `message` field. Keep support for
+    # a `response` envelope as a small compatibility fallback.
+    candidate = data.get("message", data.get("response", data)) if isinstance(data, dict) else data
     if isinstance(candidate, dict):
         return candidate
     if isinstance(candidate, str):
