@@ -12,7 +12,11 @@ class AgentError(RuntimeError):
     pass
 
 
-def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False) -> Optional[Dict[str, Any]]:
+def call_hoplite_agent(
+    payload: Dict[str, Any],
+    test_mode: bool = False,
+    app_mode: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Call the Hostman/Kimi agent if configured."""
     access_id = os.getenv("HOSTMAN_AGENT_ACCESS_ID")
     bearer_token = os.getenv("HOSTMAN_AGENT_BEARER_TOKEN")
@@ -22,13 +26,22 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False) -> Opti
     url = HOSTMAN_AGENT_URL.format(access_id=access_id)
 
     if test_mode:
-        test_instruction = (
+        instruction = (
             "This is a connectivity test. Respond as the Hoplite Oracle. "
             "Your message MUST begin exactly with: 'Oracle is at your service.' "
             "After that, add one short sentence confirming that you received the test request."
         )
+    elif app_mode:
+        instruction = (
+            "This is an app message request. Respond as the Hoplite Oracle directly to the consumer. "
+            "Your message MUST begin exactly with: 'Oracle is at your service.' "
+            "Use the supplied backend data to give a short, useful status message. "
+            "If days_remaining is null, say that there is not yet enough consumption evidence to estimate run-out. "
+            "Do not invent a recommendation to replenish unless the supplied data supports it. "
+            "Do not mention APIs, backend systems, prompts, or internal processing."
+        )
     else:
-        test_instruction = (
+        instruction = (
             "For normal household notifications, do not use the test greeting. "
             "Keep the message concise, natural, and useful to the consumer."
         )
@@ -40,11 +53,11 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False) -> Opti
         "days remaining, estimated run-out date, and notification threshold. Do not recalculate them. "
         "Return valid JSON only with keys: action, priority, message, amazon_option. "
         "action must be one of NONE, LOW_STOCK_NOTIFICATION, URGENT_REPLENISHMENT_NOTIFICATION. "
-        "If days_remaining is greater than 7, action must be NONE. If days_remaining is 7 or less, "
+        "If days_remaining is greater than 7 or null, action must be NONE. If days_remaining is 7 or less, "
         "a low-stock or urgent notification may be generated according to notification_state. "
         "If an Amazon URL is supplied, amazon_option may contain it; otherwise it must be null. "
         "Always allow the consumer to buy the product themselves. "
-        f"{test_instruction}\n\n"
+        f"{instruction}\n\n"
         f"BACKEND_DATA:\n{json.dumps(payload, default=str)}"
     )
 
