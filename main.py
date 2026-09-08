@@ -94,6 +94,56 @@ def test_ai_agent():
         }
 
 
+@app.get("/ai/message")
+def get_ai_message(device_id: str = "hoplite1"):
+    """Return a consumer-facing Oracle message for the current device status."""
+    db = SessionLocal()
+    try:
+        measurements = crud.get_measurements(db, device_id=device_id)
+        if not measurements:
+            return {
+                "status": "not_found",
+                "device_id": device_id,
+                "message": "No measurements found for this device.",
+            }
+
+        prediction = calculate_consumption(measurements)
+        backend_payload = {
+            "device_id": prediction.device_id,
+            "current_weight_g": prediction.current_weight_g,
+            "consumption_rate_g_day": prediction.consumption_rate_g_day,
+            "days_remaining": prediction.days_remaining,
+            "estimated_runout_at": prediction.estimated_runout_at,
+            "confidence": prediction.confidence,
+            "notification_state": "APP_MESSAGE_REQUEST",
+            "amazon_url": None,
+        }
+
+        try:
+            response = call_hoplite_agent(backend_payload, app_mode=True)
+        except AgentError as exc:
+            return {
+                "status": "error",
+                "device_id": device_id,
+                "error": str(exc),
+            }
+
+        if response is None:
+            return {
+                "status": "not_configured",
+                "device_id": device_id,
+                "message": "Hostman AI credentials are not configured on the backend.",
+            }
+
+        return {
+            "status": "ok",
+            "device_id": device_id,
+            "oracle": response,
+        }
+    finally:
+        db.close()
+
+
 def _latest_notification(db, device_id: str, notification_type: str):
     return (
         db.query(NotificationModel)
