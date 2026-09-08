@@ -17,24 +17,16 @@ def _parse_agent_json(candidate: Any) -> Dict[str, Any]:
     """Parse structured JSON returned by the Hostman agent."""
     if isinstance(candidate, dict):
         return candidate
-
     if not isinstance(candidate, str):
         raise AgentError("Unexpected Hostman agent response")
-
     text = candidate.strip()
-
     try:
         parsed = json.loads(text)
         if isinstance(parsed, dict):
             return parsed
     except json.JSONDecodeError:
         pass
-
-    fenced = re.search(
-        r"```(?:json)?\s*(\{.*?\})\s*```",
-        text,
-        re.DOTALL | re.IGNORECASE,
-    )
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
     if fenced:
         try:
             parsed = json.loads(fenced.group(1))
@@ -42,7 +34,6 @@ def _parse_agent_json(candidate: Any) -> Dict[str, Any]:
                 return parsed
         except json.JSONDecodeError:
             pass
-
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:
@@ -52,15 +43,10 @@ def _parse_agent_json(candidate: Any) -> Dict[str, Any]:
                 return parsed
         except json.JSONDecodeError:
             pass
-
     raise AgentError("Hostman agent returned non-JSON content")
 
 
-def call_hoplite_agent(
-    payload: Dict[str, Any],
-    test_mode: bool = False,
-    app_mode: bool = False,
-) -> Optional[Dict[str, Any]]:
+def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mode: bool = False) -> Optional[Dict[str, Any]]:
     """Call the Hostman/Kimi agent if configured."""
     access_id = os.getenv("HOSTMAN_AGENT_ACCESS_ID")
     bearer_token = os.getenv("HOSTMAN_AGENT_BEARER_TOKEN")
@@ -79,13 +65,14 @@ def call_hoplite_agent(
         instruction = (
             "This is an app message request. Respond as the Hoplite Oracle directly to the consumer. "
             "Your message MUST begin exactly with: 'Your Oracle is at your service.' "
-            "Use the supplied backend data to give a short, useful product-status message. "
-            "NEVER mention exact quantities, weights, consumption rates, measurements, or numerical amounts. "
-            "Instead, describe the status simply: say that there is enough product for now, that the product "
-            "is running low, or that it is almost finished, according to the supplied data. "
-            "If days_remaining is null, say that there is not yet enough consumption evidence to estimate run-out. "
-            "Do not invent a recommendation to replenish unless the supplied data supports it. "
-            "Do not mention APIs, backend systems, prompts, or internal processing."
+            "Keep it short, natural, reassuring, and suitable for a mobile app. "
+            "Never mention exact quantities, weights, measurements, consumption rates, dates, or numbers. "
+            "Describe status simply as enough product, running low, or almost finished. "
+            "If days_remaining is null, say there is enough product for now and that you will keep watch. "
+            "For the current safe status, use this exact message: "
+            "'Your Oracle is at your service. There is enough product for now. I will keep watch in case it runs low - your army is safe.' "
+            "Do not add an explanation about insufficient consumption evidence in this safe-status case. "
+            "Do not invent a replenishment recommendation. Do not mention APIs, backend systems, prompts, or internal processing."
         )
     else:
         instruction = (
@@ -95,27 +82,20 @@ def call_hoplite_agent(
 
     prompt = (
         "You are the Hoplite Household Replenishment Agent, also known as the Hoplite Oracle. "
-        "Use ONLY the supplied backend data. Never invent consumption, prices, availability, "
-        "dates, or product information. The backend has already calculated the consumption rate, "
-        "days remaining, estimated run-out date, and notification threshold. Do not recalculate them. "
-        "Return valid JSON only with keys: action, priority, message, amazon_option. "
-        "Do not wrap the JSON in Markdown code fences and do not add any text before or after the JSON. "
+        "Use ONLY the supplied backend data. Never invent consumption, prices, availability, dates, or product information. "
+        "The backend has already calculated the consumption rate, days remaining, estimated run-out date, and notification threshold. "
+        "Do not recalculate them. Return valid JSON only with keys: action, priority, message, amazon_option. "
+        "Do not wrap the JSON in Markdown code fences and do not add text before or after the JSON. "
         "action must be one of NONE, LOW_STOCK_NOTIFICATION, URGENT_REPLENISHMENT_NOTIFICATION. "
-        "If days_remaining is greater than 7 or null, action must be NONE. If days_remaining is 7 or less, "
-        "a low-stock or urgent notification may be generated according to notification_state. "
-        "If an Amazon URL is supplied, amazon_option may contain it; otherwise it must be null. "
-        "Always allow the consumer to buy the product themselves. "
-        f"{instruction}\n\n"
-        f"BACKEND_DATA:\n{json.dumps(payload, default=str)}"
+        "If days_remaining is greater than 7 or null, action must be NONE. If days_remaining is 7 or less, a low-stock or urgent notification may be generated according to notification_state. "
+        "If an Amazon URL is supplied, amazon_option may contain it; otherwise it must be null. Always allow the consumer to buy the product themselves. "
+        f"{instruction}\n\nBACKEND_DATA:\n{json.dumps(payload, default=str)}"
     )
 
     try:
         response = requests.post(
             url,
-            headers={
-                "Authorization": f"Bearer {bearer_token}",
-                "Content-Type": "application/json",
-            },
+            headers={"Authorization": f"Bearer {bearer_token}", "Content-Type": "application/json"},
             json={"message": prompt},
             timeout=60,
         )
@@ -125,18 +105,9 @@ def call_hoplite_agent(
         raise AgentError(f"Hostman agent request failed: {exc}") from exc
 
     candidate = data.get("message", data.get("response", data)) if isinstance(data, dict) else data
-
-    # The app-facing endpoint only needs the Oracle's consumer message. If the
-    # model returns plain text despite the JSON instruction, preserve that text
-    # rather than turning a valid AI response into an API error.
     try:
         return _parse_agent_json(candidate)
     except AgentError:
         if app_mode and isinstance(candidate, str) and candidate.strip():
-            return {
-                "action": "NONE",
-                "priority": "LOW",
-                "message": candidate.strip(),
-                "amazon_option": None,
-            }
+            return {"action": "NONE", "priority": "LOW", "message": candidate.strip(), "amazon_option": None}
         raise
