@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Any, Dict, Optional
 
 import requests
@@ -10,6 +11,53 @@ HOSTMAN_AGENT_URL = "https://agent.hostman.com/api/v1/cloud-ai/agents/{access_id
 
 class AgentError(RuntimeError):
     pass
+
+
+def _parse_agent_json(candidate: Any) -> Dict[str, Any]:
+    """Parse the structured JSON returned by the Hostman agent.
+
+    The agent is instructed to return JSON, but an LLM can occasionally wrap
+    valid JSON in Markdown fences or a short leading/trailing sentence. Accept
+    those harmless wrappers while still requiring a JSON object underneath.
+    """
+    if isinstance(candidate, dict):
+        return candidate
+
+    if not isinstance(candidate, str):
+        raise AgentError("Unexpected Hostman agent response")
+
+    text = candidate.strip()
+
+    # Normal case: the complete response is JSON.
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    # Common LLM case: JSON is wrapped in ```json ... ```.
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        try:
+            parsed = json.loads(fenced.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    # Last compatibility fallback: locate the first JSON object in the text.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            parsed = json.loads(text[start:end + 1])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    raise AgentError("Hostman agent returned non-JSON content")
 
 
 def call_hoplite_agent(
@@ -52,6 +100,7 @@ def call_hoplite_agent(
         "dates, or product information. The backend has already calculated the consumption rate, "
         "days remaining, estimated run-out date, and notification threshold. Do not recalculate them. "
         "Return valid JSON only with keys: action, priority, message, amazon_option. "
+        "Do not wrap the JSON in Markdown code fences and do not add any text before or after the JSON. "
         "action must be one of NONE, LOW_STOCK_NOTIFICATION, URGENT_REPLENISHMENT_NOTIFICATION. "
         "If days_remaining is greater than 7 or null, action must be NONE. If days_remaining is 7 or less, "
         "a low-stock or urgent notification may be generated according to notification_state. "
@@ -79,11 +128,4 @@ def call_hoplite_agent(
     # Hostman returns the agent answer in the `message` field. Keep support for
     # a `response` envelope as a small compatibility fallback.
     candidate = data.get("message", data.get("response", data)) if isinstance(data, dict) else data
-    if isinstance(candidate, dict):
-        return candidate
-    if isinstance(candidate, str):
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            raise AgentError("Hostman agent returned non-JSON content") from exc
-    raise AgentError("Unexpected Hostman agent response")
+    return _parse_agent_json(candidate)
