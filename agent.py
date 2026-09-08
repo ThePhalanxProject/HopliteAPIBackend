@@ -56,7 +56,7 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False) -> Opti
                 "Content-Type": "application/json",
             },
             json={"message": prompt},
-            timeout=20,
+            timeout=60,
         )
         response.raise_for_status()
         data = response.json()
