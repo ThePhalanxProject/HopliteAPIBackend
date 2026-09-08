@@ -14,12 +14,7 @@ class AgentError(RuntimeError):
 
 
 def _parse_agent_json(candidate: Any) -> Dict[str, Any]:
-    """Parse the structured JSON returned by the Hostman agent.
-
-    The agent is instructed to return JSON, but an LLM can occasionally wrap
-    valid JSON in Markdown fences or a short leading/trailing sentence. Accept
-    those harmless wrappers while still requiring a JSON object underneath.
-    """
+    """Parse structured JSON returned by the Hostman agent."""
     if isinstance(candidate, dict):
         return candidate
 
@@ -28,7 +23,6 @@ def _parse_agent_json(candidate: Any) -> Dict[str, Any]:
 
     text = candidate.strip()
 
-    # Normal case: the complete response is JSON.
     try:
         parsed = json.loads(text)
         if isinstance(parsed, dict):
@@ -36,8 +30,11 @@ def _parse_agent_json(candidate: Any) -> Dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
-    # Common LLM case: JSON is wrapped in ```json ... ```.
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+    fenced = re.search(
+        r"```(?:json)?\s*(\{.*?\})\s*```",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
     if fenced:
         try:
             parsed = json.loads(fenced.group(1))
@@ -46,7 +43,6 @@ def _parse_agent_json(candidate: Any) -> Dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-    # Last compatibility fallback: locate the first JSON object in the text.
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:
@@ -125,7 +121,19 @@ def call_hoplite_agent(
     except (requests.RequestException, ValueError) as exc:
         raise AgentError(f"Hostman agent request failed: {exc}") from exc
 
-    # Hostman returns the agent answer in the `message` field. Keep support for
-    # a `response` envelope as a small compatibility fallback.
     candidate = data.get("message", data.get("response", data)) if isinstance(data, dict) else data
-    return _parse_agent_json(candidate)
+
+    # The app-facing endpoint only needs the Oracle's consumer message. If the
+    # model returns plain text despite the JSON instruction, preserve that text
+    # rather than turning a valid AI response into an API error.
+    try:
+        return _parse_agent_json(candidate)
+    except AgentError:
+        if app_mode and isinstance(candidate, str) and candidate.strip():
+            return {
+                "action": "NONE",
+                "priority": "LOW",
+                "message": candidate.strip(),
+                "amazon_option": None,
+            }
+        raise
