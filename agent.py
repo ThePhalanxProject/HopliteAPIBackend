@@ -78,8 +78,11 @@ def call_hoplite_agent(
     elif app_mode:
         instruction = (
             "This is an app message request. Respond as the Hoplite Oracle directly to the consumer. "
-            "Your message MUST begin exactly with: 'Oracle is at your service.' "
-            "Use the supplied backend data to give a short, useful status message. "
+            "Your message MUST begin exactly with: 'Your Oracle is at your service.' "
+            "Use the supplied backend data to give a short, useful product-status message. "
+            "NEVER mention exact quantities, weights, consumption rates, measurements, or numerical amounts. "
+            "Instead, describe the status simply: say that there is enough product for now, that the product "
+            "is running low, or that it is almost finished, according to the supplied data. "
             "If days_remaining is null, say that there is not yet enough consumption evidence to estimate run-out. "
             "Do not invent a recommendation to replenish unless the supplied data supports it. "
             "Do not mention APIs, backend systems, prompts, or internal processing."
