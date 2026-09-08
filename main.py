@@ -61,6 +61,39 @@ def get_measurements():
         db.close()
 
 
+@app.post("/ai/test")
+@app.get("/ai/test")
+def test_ai_agent():
+    """Test the Hostman AI connection without depending on consumption data."""
+    test_payload = {
+        "device_id": "hoplite1",
+        "current_weight_g": 684.83,
+        "consumption_rate_g_day": 0.0,
+        "days_remaining": None,
+        "estimated_runout_at": None,
+        "confidence": 1.0,
+        "notification_state": "AI_CONNECTIVITY_TEST",
+        "amazon_url": None,
+    }
+
+    try:
+        response = call_hoplite_agent(test_payload, test_mode=True)
+        if response is None:
+            return {
+                "status": "not_configured",
+                "message": "Hostman AI credentials are not configured on the backend.",
+            }
+        return {
+            "status": "ok",
+            "agent_response": response,
+        }
+    except AgentError as exc:
+        return {
+            "status": "error",
+            "error": str(exc),
+        }
+
+
 def _latest_notification(db, device_id: str, notification_type: str):
     return (
         db.query(NotificationModel)
