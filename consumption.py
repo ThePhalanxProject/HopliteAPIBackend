@@ -22,7 +22,7 @@ def _to_utc(value: datetime) -> datetime:
 
 
 def calculate_consumption(measurements: List[object], empty_threshold_g: float = 50.0) -> ConsumptionPrediction:
-    """Estimate daily consumption from historical weight readings using linear regression."""
+    """Estimate daily consumption using only the latest three valid weight readings."""
     if not measurements:
         raise ValueError("No measurements available")
 
@@ -33,10 +33,14 @@ def calculate_consumption(measurements: List[object], empty_threshold_g: float =
     if not points:
         raise ValueError("No valid measurements available")
 
+    # For the MVP, ignore older/test history and use only the latest three readings.
+    points = points[-3:]
     latest = points[-1]
     latest_time = _to_utc(latest.timestamp)
 
-    if len(points) < 2:
+    # Three readings give us a simple, stable short-term trend without relying on
+    # the older test data. Until three real readings exist, do not predict usage.
+    if len(points) < 3:
         return ConsumptionPrediction(
             device_id=latest.device_id,
             current_weight_g=float(latest.weight),
@@ -82,9 +86,10 @@ def calculate_consumption(measurements: List[object], empty_threshold_g: float =
         days_remaining = usable_weight / consumption_rate
         runout = latest_time + timedelta(days=days_remaining)
 
-    sample_factor = min(1.0, len(points) / 20.0)
+    # With exactly three recent readings, confidence reflects only the available
+    # time span; it is deliberately not inflated by the old test history.
     span_factor = min(1.0, span_days / 7.0)
-    confidence = round(0.2 + 0.4 * sample_factor + 0.4 * span_factor, 2)
+    confidence = round(0.2 + 0.8 * span_factor, 2)
 
     return ConsumptionPrediction(
         device_id=latest.device_id,
