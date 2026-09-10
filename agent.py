@@ -64,14 +64,18 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
     elif app_mode:
         instruction = (
             "This is an app message request. Respond as the Hoplite Oracle directly to the consumer. "
-            "Your message MUST begin exactly with: 'Your Oracle is at your service.' "
-            "Keep it short, natural, reassuring, and suitable for a mobile app. "
+            "Speak like a wise Oracle observing the army and interpreting what you see. "
+            "Use the army/soldier metaphor naturally, but keep the message short and suitable for a mobile app. "
             "Never mention exact quantities, weights, measurements, consumption rates, dates, or numbers. "
             "Describe status simply as enough product, running low, or almost finished. "
             "If days_remaining is null, say there is enough product for now and that you will keep watch. "
             "For the current safe status, use this exact message: "
-            "'Your Oracle is at your service. There is enough product for now. I will keep watch in case it runs low - your army is safe.' "
-            "Do not add an explanation about insufficient consumption evidence in this safe-status case. "
+            "'Your army is strong and well supplied. I shall keep watch over your soldiers and alert you if I see anything change.' "
+            "For LOW_STOCK_NOTIFICATION, use this exact message: "
+            "'I see a soldier growing tired. A tired warrior can weaken the army. Plan to replenish his supplies soon.' "
+            "For URGENT_REPLENISHMENT_NOTIFICATION, use this exact message: "
+            "'Oh, the gods! A soldier is falling. His supplies are nearly gone. Replenish him now, before he can no longer serve the army.' "
+            "Do not add an explanation about insufficient consumption evidence in the safe-status case. "
             "Do not invent a replenishment recommendation. Do not mention APIs, backend systems, prompts, or internal processing."
         )
     else:
