@@ -59,7 +59,9 @@ point is credited for each accepted tap, including historical taps already
 stored in the database. Retrying a request returns zero new points. Stock
 messages are available on tap or through `GET /pilot/pack/oracle`, and both
 accept `?language=en` or `?language=fr`. The pilot uses the existing Hostman
-agent configuration and returns a stock message even if the agent is offline.
+agent configuration to generate the entire stock message, including the earned
+point after a new tap. The API returns a null message if the agent is offline
+or the request is a retry. The balance and points remain available.
 Low stock starts at seven days, urgent at three days or when less than one
 dose remains. Primio must display these responses. No push delivery is configured.
 

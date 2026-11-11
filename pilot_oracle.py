@@ -1,5 +1,6 @@
 from math import isfinite
 from os import getenv
+from uuid import uuid4
 
 import requests
 from fastapi import HTTPException
@@ -10,7 +11,7 @@ from agent import AgentError, call_hoplite_agent
 
 class OracleMessage(BaseModel):
     stock_status: str
-    message: str
+    message: str | None
     source: str
 
 
@@ -21,22 +22,12 @@ class PriceSearch(BaseModel):
     language: str = Field(default="en", pattern=r"^(en|fr)$")
 
 
-STOCK_COPY = {
-    "en": {
-        "not_started": "Start your pack when you’re ready.",
-        "ok": "Your stock looks good for now.",
-        "low": "Your product is running low. Plan to replenish it soon.",
-        "urgent": "Your product is nearly finished. It’s time to replenish.",
-        "empty": "Your pack is empty. It’s time to replenish.",
-    },
-    "fr": {
-        "not_started": "Activez votre pack quand vous êtes prêt.",
-        "ok": "Il vous reste suffisamment de produit pour le moment.",
-        "low": "Votre produit commence à manquer. Pensez à le renouveler bientôt.",
-        "urgent": "Votre produit est presque épuisé. Il est temps de le renouveler.",
-        "empty": "Votre pack est vide. Il est temps de le renouveler.",
-    },
-}
+STOCK_STYLES = (
+    "Lead with the stock outlook.",
+    "Lead with the reward if earned, then give the stock outlook.",
+    "Use a warm, conversational update.",
+    "Use a concise Oracle-style observation with a practical next step if stock is low.",
+)
 
 
 def oracle_copy(payload, fallback, *, generate=True):
@@ -52,7 +43,7 @@ def oracle_copy(payload, fallback, *, generate=True):
     return fallback, "fallback"
 
 
-def stock_message(pack, language, *, generate=True):
+def stock_message(pack, language, *, points_earned=0, generate=True):
     days = pack.days_remaining
     if pack.started_at is None:
         state = "not_started"
@@ -65,25 +56,20 @@ def stock_message(pack, language, *, generate=True):
     else:
         state = "ok"
 
-    fallback = STOCK_COPY[language][state]
-    if state in {"low", "urgent"} and days is not None:
-        if language == "fr":
-            duration = "moins d’un jour" if days < 1 else f"environ {round(days)} j"
-            fallback += f" Stock estimé pour {duration}."
-        else:
-            duration = "less than a day" if days < 1 else f"about {round(days)} day(s)"
-            fallback += f" Estimated supply remaining is {duration}."
-
-    message, source = oracle_copy(
+    message, _ = oracle_copy(
         {
             "task": "stock_update",
             "stock_status": state,
             "days_remaining": days,
+            "points_earned": points_earned,
             "language": language,
+            "style": STOCK_STYLES[pack.sample_count % len(STOCK_STYLES)],
+            "variation_id": str(uuid4()),
         },
-        fallback,
+        None,
         generate=generate,
     )
+    source = "kimi" if message else "unavailable" if generate else "skipped"
     return OracleMessage(stock_status=state, message=message, source=source)
 
 

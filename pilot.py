@@ -153,10 +153,9 @@ def record_usage(
     db.commit()
 
     points_earned = int(duplicate is None)
-    oracle = stock_message(result, language, generate=bool(points_earned))
-    if points_earned:
-        reward = "Vous avez gagné 1 point." if language == "fr" else "You earned 1 point."
-        oracle.message = f"{oracle.message} {reward}"
+    oracle = stock_message(
+        result, language, points_earned=points_earned, generate=bool(points_earned)
+    )
     return UsageResult(
         **result.model_dump(), points_earned=points_earned, oracle=oracle
     )
