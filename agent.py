@@ -122,12 +122,18 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
             url,
             headers={"Authorization": f"Bearer {bearer_token}", "Content-Type": "application/json"},
             json={"message": prompt},
-            timeout=4 if pilot_mode else 60,
+            timeout=(5, 60),
         )
         response.raise_for_status()
         data = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        raise AgentError(f"Hostman agent request failed: {exc}") from exc
+    except requests.Timeout as exc:
+        raise AgentError("Hostman agent request timed out") from exc
+    except requests.HTTPError as exc:
+        raise AgentError(f"Hostman agent returned HTTP {response.status_code}") from exc
+    except requests.RequestException as exc:
+        raise AgentError("Hostman agent request failed") from exc
+    except ValueError as exc:
+        raise AgentError("Hostman agent returned an invalid HTTP response body") from exc
 
     candidate = data.get("message", data.get("response", data)) if isinstance(data, dict) else data
     try:

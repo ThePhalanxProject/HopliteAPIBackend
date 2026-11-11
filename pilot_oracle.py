@@ -1,3 +1,4 @@
+import logging
 from math import isfinite
 from os import getenv
 from uuid import uuid4
@@ -7,6 +8,8 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from agent import AgentError, call_hoplite_agent
+
+logger = logging.getLogger(__name__)
 
 
 class OracleMessage(BaseModel):
@@ -34,12 +37,17 @@ def oracle_copy(payload, fallback, *, generate=True):
     if generate:
         try:
             response = call_hoplite_agent(payload, pilot_mode=True)
-        except AgentError:
-            response = None
+        except AgentError as exc:
+            logger.warning("Pilot Oracle generation failed: %s", exc)
+            return fallback, "fallback"
+        if response is None:
+            logger.warning("Pilot Oracle credentials are not configured")
+            return fallback, "fallback"
         if response:
             message = response.get("message")
             if isinstance(message, str) and 0 < len(message.strip()) <= 300:
                 return message.strip(), "kimi"
+        logger.warning("Pilot Oracle response had no usable message")
     return fallback, "fallback"
 
 
