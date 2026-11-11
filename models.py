@@ -52,3 +52,10 @@ class PilotUsageEvent(Base):
     request_id = Column(String(36), nullable=False)
     grams_used = Column(Integer, nullable=False)
     occurred_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class PilotMessagePreference(Base):
+    __tablename__ = "pilot_message_preferences"
+
+    user_id = Column(ForeignKey("pilot_users.id"), primary_key=True)
+    language = Column(String(2), nullable=False)

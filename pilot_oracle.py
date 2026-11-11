@@ -22,7 +22,7 @@ class PriceSearch(BaseModel):
     product: str = Field(min_length=3, max_length=160)
     city: str = Field(min_length=2, max_length=100)
     country: str = Field(pattern=r"^[a-z]{2}$")
-    language: str = Field(default="en", pattern=r"^(en|fr)$")
+    language: str | None = Field(default=None, pattern=r"^(en|fr)$")
 
 
 STOCK_STYLES = (

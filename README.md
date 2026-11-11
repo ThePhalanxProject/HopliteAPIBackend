@@ -72,3 +72,9 @@ Google Shopping listings localized to that city, ranked by listed item price.
 Listings can include online offers or different product variants, and require
 checking size, delivery fees and availability. The endpoint does not verify
 inventory or shelf prices at physical stores.
+
+Each pilot participant can save their Oracle message language using
+`PUT /pilot/preferences/message-language` with `{"language":"fr"}` or
+`{"language":"en"}`. The corresponding GET returns the saved setting,
+defaulting to English. Stock, tap, and shopping messages use the saved
+setting when the request omits an explicit language override.

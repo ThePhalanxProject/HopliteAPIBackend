@@ -2,6 +2,7 @@ from argparse import ArgumentParser
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from secrets import token_urlsafe
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, pilot_prices, stock_message
 from database import Base, SessionLocal, engine
-from models import PilotPack, PilotUsageEvent, PilotUser
+from models import PilotMessagePreference, PilotPack, PilotUsageEvent, PilotUser
 
 STARTING_WEIGHT_G = 1500
 DOSE_G = 65
@@ -64,6 +65,34 @@ def participant(
         if user is not None:
             return user
     raise HTTPException(401, "Invalid pilot credential", headers={"WWW-Authenticate": "Bearer"})
+
+
+class MessagePreference(BaseModel):
+    language: Literal["en", "fr"]
+
+
+def message_language(db: Session, user_id: int) -> str:
+    preference = db.get(PilotMessagePreference, user_id)
+    return preference.language if preference else "en"
+
+
+@router.get("/preferences/message-language", response_model=MessagePreference)
+def read_message_language(
+    user: PilotUser = Depends(participant), db: Session = Depends(get_db)
+):
+    return MessagePreference(language=message_language(db, user.id))
+
+
+@router.put("/preferences/message-language", response_model=MessagePreference)
+def set_message_language(
+    preference: MessagePreference,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    db.scalar(select(PilotUser.id).where(PilotUser.id == user.id).with_for_update())
+    db.merge(PilotMessagePreference(user_id=user.id, language=preference.language))
+    db.commit()
+    return preference
 
 
 def get_pack(db: Session, user: PilotUser, *, lock: bool = False) -> PilotPack:
@@ -126,7 +155,7 @@ def record_usage(
     tap: UsageTap,
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
-    language: str = Query("en", pattern="^(en|fr)$"),
+    language: str | None = Query(None, pattern="^(en|fr)$"),
 ):
     pack = get_pack(db, user, lock=True)
     if pack.started_at is None:
@@ -150,6 +179,7 @@ def record_usage(
         ))
         db.flush()
         result = pack_status(db, pack, now)
+    language = language or message_language(db, user.id)
     db.commit()
 
     points_earned = int(duplicate is None)
@@ -165,9 +195,10 @@ def record_usage(
 def read_oracle(
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
-    language: str = Query("en", pattern="^(en|fr)$"),
+    language: str | None = Query(None, pattern="^(en|fr)$"),
 ):
     status = pack_status(db, get_pack(db, user), datetime.now(timezone.utc))
+    language = language or message_language(db, user.id)
     db.rollback()
     return stock_message(status, language)
 
@@ -178,8 +209,9 @@ def search_prices(
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
 ):
+    language = query.language or message_language(db, user.id)
     db.rollback()
-    return pilot_prices(query)
+    return pilot_prices(query.model_copy(update={"language": language}))
 
 
 def provision_participant(db: Session, participant_code: str) -> str:
