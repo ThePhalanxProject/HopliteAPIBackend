@@ -4,7 +4,7 @@ from hashlib import sha256
 from secrets import token_urlsafe
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from consumption import _to_utc
+from pilot_oracle import OracleMessage, PriceSearch, pilot_prices, stock_message
 from database import Base, SessionLocal, engine
 from models import PilotPack, PilotUsageEvent, PilotUser
 
@@ -31,10 +32,16 @@ class PackStatus(BaseModel):
     current_weight_g: int
     full_doses_remaining: int
     sample_count: int
+    user_points: int
     data_span_days: float
     consumption_rate_g_day: float | None = None
     days_remaining: float | None = None
     estimated_runout_at: datetime | None = None
+
+
+class UsageResult(PackStatus):
+    points_earned: int
+    oracle: OracleMessage
 
 
 def get_db():
@@ -83,6 +90,7 @@ def pack_status(db: Session, pack: PilotPack, now: datetime) -> PackStatus:
         current_weight_g=remaining,
         full_doses_remaining=remaining // DOSE_G,
         sample_count=count,
+        user_points=count,
         data_span_days=elapsed_days,
     )
     if remaining == 0:
@@ -113,11 +121,12 @@ def start_pack(user: PilotUser = Depends(participant), db: Session = Depends(get
     return result
 
 
-@router.post("/pack/usage", response_model=PackStatus)
+@router.post("/pack/usage", response_model=UsageResult)
 def record_usage(
     tap: UsageTap,
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
+    language: str = Query("en", pattern="^(en|fr)$"),
 ):
     pack = get_pack(db, user, lock=True)
     if pack.started_at is None:
@@ -142,7 +151,36 @@ def record_usage(
         db.flush()
         result = pack_status(db, pack, now)
     db.commit()
-    return result
+
+    points_earned = int(duplicate is None)
+    oracle = stock_message(result, language, generate=bool(points_earned))
+    if points_earned:
+        reward = "Vous avez gagné 1 point." if language == "fr" else "You earned 1 point."
+        oracle.message = f"{oracle.message} {reward}"
+    return UsageResult(
+        **result.model_dump(), points_earned=points_earned, oracle=oracle
+    )
+
+
+@router.get("/pack/oracle", response_model=OracleMessage)
+def read_oracle(
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+    language: str = Query("en", pattern="^(en|fr)$"),
+):
+    status = pack_status(db, get_pack(db, user), datetime.now(timezone.utc))
+    db.rollback()
+    return stock_message(status, language)
+
+
+@router.post("/prices")
+def search_prices(
+    query: PriceSearch,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    return pilot_prices(query)
 
 
 def provision_participant(db: Session, participant_code: str) -> str:

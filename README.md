@@ -51,3 +51,22 @@ timestamp is the time of the last tap.
 
 Pilot responses expose the forecast and dose count for Primio to display.
 The pilot endpoints do not send notifications.
+
+### Pilot Oracle and price search
+
+Usage responses include `user_points`, `points_earned`, and `oracle`. One
+point is credited for each accepted tap, including historical taps already
+stored in the database. Retrying a request returns zero new points. Stock
+messages are available on tap or through `GET /pilot/pack/oracle`, and both
+accept `?language=en` or `?language=fr`. The pilot uses the existing Hostman
+agent configuration and returns a stock message even if the agent is offline.
+Low stock starts at seven days, urgent at three days or when less than one
+dose remains. Primio must display these responses. No push delivery is configured.
+
+The authenticated `POST /pilot/prices` endpoint accepts a specific product
+(including size), city, two-letter lowercase country code, and optional
+`language` (English or French). Set `SERPAPI_API_KEY` to enable it. Results are
+Google Shopping listings localized to that city, ranked by listed item price.
+Listings can include online offers or different product variants, and require
+checking size, delivery fees and availability. The endpoint does not verify
+inventory or shelf prices at physical stores.

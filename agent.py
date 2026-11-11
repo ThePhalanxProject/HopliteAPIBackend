@@ -46,7 +46,7 @@ def _parse_agent_json(candidate: Any) -> Dict[str, Any]:
     raise AgentError("Hostman agent returned non-JSON content")
 
 
-def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mode: bool = False) -> Optional[Dict[str, Any]]:
+def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mode: bool = False, *, pilot_mode: bool = False) -> Optional[Dict[str, Any]]:
     """Call the Hostman/Kimi agent if configured."""
     access_id = os.getenv("HOSTMAN_AGENT_ACCESS_ID")
     bearer_token = os.getenv("HOSTMAN_AGENT_BEARER_TOKEN")
@@ -60,6 +60,15 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
             "This is a connectivity test. Respond as the Hoplite Oracle. "
             "Your message MUST begin exactly with: 'Oracle is at your service.' "
             "After that, add one short sentence confirming that you received the test request."
+        )
+    elif pilot_mode:
+        instruction = (
+            "Write one short consumer-facing sentence for the Hoplite pilot. "
+            "For a stock update, use the supplied status and approximate days remaining if available. "
+            "Do not mention reward points because the app displays them separately. "
+            "For a shopping update, refer only to the supplied offer and never imply local store "
+            "inventory, pickup availability, or that the price is guaranteed. "
+            "Use the requested language."
         )
     elif app_mode:
         instruction = (
@@ -98,12 +107,20 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
         f"{instruction}\n\nBACKEND_DATA:\n{json.dumps(payload, default=str)}"
     )
 
+    if pilot_mode:
+        prompt = (
+            "You are the Hoplite Oracle. Use only the supplied data. "
+            "Do not recalculate estimates or invent prices, dates, or availability. "
+            'Return only a JSON object with one key, "message". '
+            f"{instruction}\n\nBACKEND_DATA:\n{json.dumps(payload, default=str)}"
+        )
+
     try:
         response = requests.post(
             url,
             headers={"Authorization": f"Bearer {bearer_token}", "Content-Type": "application/json"},
             json={"message": prompt},
-            timeout=60,
+            timeout=4 if pilot_mode else 60,
         )
         response.raise_for_status()
         data = response.json()
