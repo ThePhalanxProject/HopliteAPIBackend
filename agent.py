@@ -68,7 +68,7 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
             "Write fresh wording each time. Vary the opening and sentence structure using the style provided. "
             "If points_earned is 1, include that the user earned one point, in your own words. "
             "Otherwise, omit any claim that the user earned points. "
-            "For a shopping update, refer only to the supplied offer and never imply local store "
+            "For shopping, state the price per wash and currency from the supplied offer. Never lead with the pack price or imply local store "
             "inventory, pickup availability, or that the price is guaranteed. "
             "Use the requested language."
         )

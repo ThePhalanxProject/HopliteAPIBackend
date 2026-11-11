@@ -1,4 +1,7 @@
 import logging
+import re
+from decimal import Decimal
+from ipaddress import ip_address
 from math import isfinite
 from os import getenv
 from uuid import uuid4
@@ -19,9 +22,7 @@ class OracleMessage(BaseModel):
 
 
 class PriceSearch(BaseModel):
-    product: str = Field(min_length=3, max_length=160)
-    city: str = Field(min_length=2, max_length=100)
-    country: str = Field(pattern=r"^[a-z]{2}$")
+    brand: str = Field(min_length=2, max_length=100, pattern=r"\S")
     language: str | None = Field(default=None, pattern=r"^(en|fr)$")
 
 
@@ -81,40 +82,80 @@ def stock_message(pack, language, *, points_earned=0, generate=True):
     return OracleMessage(stock_status=state, message=message, source=source)
 
 
-def pilot_prices(query):
-    key = getenv("SERPAPI_API_KEY")
-    if not key:
-        raise HTTPException(503, "Shopping search is not configured")
+WASH_COUNT = re.compile(
+    r"\b([1-9][0-9]{0,3})\s*(?:lavages?|lessives?|doses?|wash(?:es)?|loads?)\b",
+    re.IGNORECASE,
+)
+MULTIPACK = re.compile(r"\b(?:lot de|pack of|multipack|[2-9]\s*[x×])\b", re.IGNORECASE)
 
+
+def shopping_location(client_ip: str | None) -> tuple[str, str]:
+    token = getenv("IPINFO_TOKEN")
+    if not token:
+        raise HTTPException(503, "IP location lookup is not configured")
+    try:
+        address = ip_address(client_ip or "")
+    except ValueError:
+        raise HTTPException(422, "Client IP location is unavailable") from None
+    if not address.is_global:
+        raise HTTPException(422, "Client IP location is unavailable")
+    try:
+        response = requests.get(
+            f"https://api.ipinfo.io/lookup/{address}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5,
+        )
+        response.raise_for_status()
+        geo = response.json()["geo"]
+        country = geo["country_code"].lower()
+        if not re.fullmatch(r"[a-z]{2}", country) or not geo["city"] or not geo["country"]:
+            raise ValueError("Incomplete location")
+        location = ", ".join(dict.fromkeys(
+            part for part in (geo["city"], geo.get("region"), geo["country"]) if part
+        ))
+        return location, country
+    except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError):
+        raise HTTPException(502, "City-level IP location is unavailable") from None
+
+
+def shopping_results(query, location, country, language, key):
     try:
         response = requests.get(
             "https://serpapi.com/search.json",
             params={
-                "engine": "google_shopping",
-                "q": query.product,
-                "location": query.city,
-                "gl": query.country,
-                "hl": query.language,
-                "api_key": key,
+                "engine": "google_shopping", "q": query, "location": location,
+                "gl": country, "hl": language, "api_key": key,
             },
             timeout=8,
         )
         response.raise_for_status()
         data = response.json()
-        if not isinstance(data, dict) or data.get("error"):
-            raise ValueError("Shopping search returned an error")
         results = data.get("shopping_results", [])
-        if not isinstance(results, list):
+        if data.get("error") or not isinstance(results, list):
             raise ValueError("Invalid shopping results")
-    except (requests.RequestException, ValueError):
+        return results
+    except (requests.RequestException, ValueError, AttributeError):
         raise HTTPException(502, "Shopping search is temporarily unavailable") from None
+
+
+def pilot_prices(brand, language, client_ip):
+    key = getenv("SERPAPI_API_KEY")
+    if not key:
+        raise HTTPException(503, "Shopping search is not configured")
+    location, country = shopping_location(client_ip)
+    category = "lessive liquide machine lavages" if language == "fr" else "liquid laundry detergent washes"
+    reference = "1,5 L" if language == "fr" else "1.5 L"
+    rows = shopping_results(f"{brand} {category} {reference}", location, country, language, key)
+    rows += shopping_results(category, location, country, language, key)
 
     offers = []
     seen_links = set()
-    for row in results:
+    for row in rows:
         if not isinstance(row, dict) or row.get("second_hand_condition"):
             continue
         amount = row.get("extracted_price")
+        price = row.get("price")
+        title = row.get("title")
         link = row.get("link") or row.get("product_link")
         if (
             not isinstance(amount, (int, float))
@@ -124,31 +165,44 @@ def pilot_prices(query):
             or not isinstance(link, str)
             or not link.startswith("https://")
             or link in seen_links
-            or not row.get("price")
-            or not row.get("title")
+            or not isinstance(price, str)
+            or not isinstance(title, str)
+            or MULTIPACK.search(title)
         ):
             continue
+        counts = set(WASH_COUNT.findall(title))
+        currency = re.sub(r"[\d.,\s]", "", price)
+        currency = {"EUR": "€", "GBP": "£", "USD": "US$"}.get(currency, currency)
+        if len(counts) != 1 or not currency:
+            continue
+        washes = int(counts.pop())
         seen_links.add(link)
         offers.append({
-            "title": row["title"],
-            "retailer": row.get("source"),
-            "price": row["price"],
-            "amount": amount,
-            "url": link,
-            "delivery": row.get("delivery"),
+            "title": title, "retailer": row.get("source"), "listed_price": price,
+            "wash_count": washes, "currency": currency, "url": link,
+            "price_per_wash": Decimal(str(amount)) / washes,
         })
-    offers = sorted(offers, key=lambda offer: offer["amount"])[:5]
+
+    # Price ranking is meaningful only within a common currency.
+    currency = max((o["currency"] for o in offers), key=lambda c: sum(o["currency"] == c for o in offers), default=None)
+    offers = sorted(
+        (o for o in offers if o["currency"] == currency),
+        key=lambda offer: offer["price_per_wash"],
+    )[:5]
+    for offer in offers:
+        offer["price_per_wash"] = float(round(offer["price_per_wash"], 4))
+    result = {"location": location, "reference_brand": brand, "reference_volume_l": 1.5, "offers": offers}
     if not offers:
-        return {"offers": [], "message": None, "message_source": None}
+        return {**result, "message": None, "message_source": None}
 
     best = offers[0]
-    fallback = (
-        f"Prix le plus bas trouvé dans ces résultats : {best['price']}."
-        if query.language == "fr"
-        else f"The lowest listed price in these results is {best['price']}."
-    )
     message, source = oracle_copy(
-        {"task": "shopping_update", "offer": best["price"], "language": query.language},
-        fallback,
+        {
+            "task": "shopping_update",
+            "offer": best,
+            "ranking_basis": "listed item price per wash; exclude delivery",
+            "language": language,
+        },
+        None,
     )
-    return {"offers": offers, "message": message, "message_source": source}
+    return {**result, "message": message, "message_source": source if message else "unavailable"}

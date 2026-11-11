@@ -65,13 +65,19 @@ or the request is a retry. The balance and points remain available.
 Low stock starts at seven days, urgent at three days or when less than one
 dose remains. Primio must display these responses. No push delivery is configured.
 
-The authenticated `POST /pilot/prices` endpoint accepts a specific product
-(including size), city, two-letter lowercase country code, and optional
-`language` (English or French). Set `SERPAPI_API_KEY` to enable it. Results are
-Google Shopping listings localized to that city, ranked by listed item price.
-Listings can include online offers or different product variants, and require
-checking size, delivery fees and availability. The endpoint does not verify
-inventory or shelf prices at physical stores.
+The authenticated `POST /pilot/prices` endpoint takes `{"brand":"Ariel"}`.
+It uses the participant's saved message language unless the request includes
+an explicit language. A 1.5 L liquid laundry pack is the reference product.
+Similar packs of other sizes and brands can rank when the listing title states
+a wash count. Ranking uses listed item price per wash, excluding delivery.
+Mixed currencies are not compared.
+
+Set `SERPAPI_API_KEY` and a city-capable IPinfo Core `IPINFO_TOKEN`.
+The API resolves the request's public client IP through IPinfo, and sends only
+the resulting location to the shopping provider. If deploying behind a proxy,
+configure Uvicorn's `FORWARDED_ALLOW_IPS` for the actual trusted proxy addresses
+so the ASGI request contains the client IP. Verify this on the deployed service.
+Listings do not verify local shelf stock.
 
 Each pilot participant can save their Oracle message language using
 `PUT /pilot/preferences/message-language` with `{"language":"fr"}` or
