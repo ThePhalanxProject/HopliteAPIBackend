@@ -25,3 +25,29 @@ The backend performs the arithmetic and trigger decision. The AI agent only turn
 - Duplicate notifications of the same type are suppressed.
 
 The Docker deployment continues to start the existing FastAPI application with Uvicorn.
+
+## Button-based pilot
+
+Set `DATABASE_URL` to the deployment's PostgreSQL connection URL in the
+runtime environment before starting the API. Startup creates the pilot tables.
+The pilot data lives in its own tables, keyed to each participant.
+
+Run `python -m pilot P01` with the same database configuration to create a
+participant and assign a pack. The command prints the participant's bearer token
+once. Deliver it privately and use HTTPS for all requests.
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /pilot/pack/start` | Starts the participant's 1,500 g pack. Repeating the request retains the original start time. |
+| `GET /pilot/pack` | Returns the current balance, full doses left and forecast. |
+| `POST /pilot/pack/usage` | Records one use. Send `{"request_id":"<UUID>"}` and reuse that UUID if retrying the same tap. |
+
+Send `Authorization: Bearer <token>` with each request. Each tap deducts
+65 g, capped at the remaining balance. The API uses all accepted taps for the
+pack and the actual elapsed time since activation, including time between
+taps. The forecast is available after two uses and 48 hours of history. It
+is recalculated when the client reads the pack. Once empty, the run-out
+timestamp is the time of the last tap.
+
+Pilot responses expose the forecast and dose count for Primio to display.
+The pilot endpoints do not send notifications.
