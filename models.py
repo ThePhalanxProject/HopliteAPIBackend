@@ -59,3 +59,22 @@ class PilotMessagePreference(Base):
 
     user_id = Column(ForeignKey("pilot_users.id"), primary_key=True)
     language = Column(String(2), nullable=False)
+
+
+class PilotLogin(Base):
+    __tablename__ = "pilot_logins"
+
+    user_id = Column(ForeignKey("pilot_users.id"), primary_key=True)
+    email = Column(String(254), unique=True, nullable=False)
+    display_name = Column(String(100), nullable=False)
+    password_hash = Column(String(128), nullable=False)
+    failed_attempts = Column(Integer, nullable=False, default=0)
+    locked_until = Column(DateTime(timezone=True))
+
+
+class PilotSession(Base):
+    __tablename__ = "pilot_sessions"
+
+    token_hash = Column(String(64), primary_key=True)
+    user_id = Column(ForeignKey("pilot_users.id"), nullable=False, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)

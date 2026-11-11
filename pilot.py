@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, pilot_prices, stock_message
 from database import Base, SessionLocal, engine
-from models import PilotMessagePreference, PilotPack, PilotUsageEvent, PilotUser
+from models import PilotMessagePreference, PilotPack, PilotSession, PilotUsageEvent, PilotUser
 
 STARTING_WEIGHT_G = 1500
 DOSE_G = 65
@@ -59,9 +59,13 @@ def participant(
     db: Session = Depends(get_db),
 ) -> PilotUser:
     if credentials is not None:
-        user = db.scalar(select(PilotUser).where(
-            PilotUser.token_hash == token_digest(credentials.credentials)
-        ))
+        digest = token_digest(credentials.credentials)
+        user = db.scalar(select(PilotUser).where(PilotUser.token_hash == digest))
+        if user is None:
+            user = db.scalar(select(PilotUser).join(PilotSession).where(
+                PilotSession.token_hash == digest,
+                PilotSession.expires_at > datetime.now(timezone.utc),
+            ))
         if user is not None:
             return user
     raise HTTPException(401, "Invalid pilot credential", headers={"WWW-Authenticate": "Bearer"})

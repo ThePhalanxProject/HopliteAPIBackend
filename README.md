@@ -86,3 +86,12 @@ Each pilot participant can save their Oracle message language using
 `{"language":"en"}`. The corresponding GET returns the saved setting,
 defaulting to English. Stock, tap, and shopping messages use the saved
 setting when the request omits an explicit language override.
+
+### Pilot app sign-in
+
+Use an existing pilot token once as an invitation in Primio's sign-up screen.
+Enrollment adds email/password sign-in to the same pilot participant and pack.
+Subsequent logins create a seven-day bearer session accepted by the existing
+pilot endpoints. Logout revokes that session when the backend is reachable.
+Existing pilot tokens continue to work for API testing. Local-only Primio user
+accounts must enroll to get a backend session.
