@@ -76,7 +76,10 @@ listed item price per wash, excluding delivery. Mixed currencies are not compare
 
 Set `SERPAPI_API_KEY` for shopping. Primio asks the participant to enter a city
 and country, and the API uses those values to localize shopping results.
-Listings do not verify local shelf stock.
+The consumer retailer filter currently covers France and accepts listings only
+from the configured retail chains with a direct link on the retailer's website.
+Wholesale listings, unknown sellers, and Google-only product links are excluded.
+Listings do not verify checkout prices or local shelf stock.
 
 Each pilot participant can save their Oracle message language using
 `PUT /pilot/preferences/message-language` with `{"language":"fr"}` or

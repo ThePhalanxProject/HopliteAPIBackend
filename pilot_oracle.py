@@ -4,6 +4,7 @@ from decimal import Decimal
 from math import isfinite
 from os import getenv
 from unicodedata import combining, normalize
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import requests
@@ -148,10 +149,59 @@ def matches_brand(row: dict, title: str, requested: list[str]) -> bool:
     return False
 
 
+# Start with French supermarkets and online grocers serving consumers.
+CONSUMER_RETAILERS = {
+    "fr": {
+        "Auchan": ("auchan.fr",),
+        "Carrefour": ("carrefour.fr",),
+        "Courses U": ("coursesu.com",),
+        "E.Leclerc": ("e.leclerc", "leclercdrive.fr"),
+        "Houra": ("houra.fr",),
+        "Intermarché": ("intermarche.com",),
+        "Monoprix": ("monoprix.fr",),
+    },
+}
+
+BUSINESS_ONLY = re.compile(
+    r"\b(?:b2b|wholesale(?: only)?|grossiste|réservé aux professionnels|"
+    r"professionals only|hors taxes|(?:prix )?ht|excl(?:uding)?[. ]+vat)\b",
+    re.IGNORECASE,
+)
+
+
+def consumer_offer(row, country):
+    retailers = CONSUMER_RETAILERS.get(country, {})
+    source = row.get("source")
+    if not isinstance(source, str):
+        return None
+    for retailer, domains in retailers.items():
+        if brand_words(source) not in (brand_words(retailer), *(brand_words(domain) for domain in domains)):
+            continue
+        for link in (row.get("link"), row.get("product_link")):
+            if not isinstance(link, str):
+                continue
+            try:
+                url = urlsplit(link)
+            except ValueError:
+                continue
+            host = url.hostname or ""
+            if (
+                url.scheme == "https"
+                and not url.username
+                and not url.password
+                and url.path.strip("/")
+                and any(host == domain or host.endswith("." + domain) for domain in domains)
+            ):
+                return retailer, link
+    return None
+
+
 def pilot_prices(brand, language, location, country):
     key = getenv("SERPAPI_API_KEY")
     if not key:
         raise HTTPException(503, "Shopping search is not configured")
+    if country not in CONSUMER_RETAILERS:
+        raise HTTPException(422, "Consumer retailer comparison is currently available in France")
     category = "lessive liquide machine lavages" if language == "fr" else "liquid laundry detergent washes"
     reference = "1,5 L" if language == "fr" else "1.5 L"
     rows = shopping_results(f"{brand} {category} {reference}", location, country, language, key)
@@ -166,20 +216,22 @@ def pilot_prices(brand, language, location, country):
         amount = row.get("extracted_price")
         price = row.get("price")
         title = row.get("title")
-        link = row.get("link") or row.get("product_link")
+        consumer = consumer_offer(row, country)
         if (
             not isinstance(amount, (int, float))
             or isinstance(amount, bool)
             or not isfinite(amount)
             or amount <= 0
-            or not isinstance(link, str)
-            or not link.startswith("https://")
-            or link in seen_links
+            or consumer is None
             or not isinstance(price, str)
             or not isinstance(title, str)
             or MULTIPACK.search(title)
+            or BUSINESS_ONLY.search(f"{title} {price} {row.get('snippet') or ''}")
             or not matches_brand(row, title, requested_brand)
         ):
+            continue
+        retailer, link = consumer
+        if link in seen_links:
             continue
         counts = set(WASH_COUNT.findall(title))
         currency = re.sub(r"[\d.,\s]", "", price)
@@ -189,7 +241,7 @@ def pilot_prices(brand, language, location, country):
         washes = int(counts.pop())
         seen_links.add(link)
         offers.append({
-            "title": title, "retailer": row.get("source"), "listed_price": price,
+            "title": title, "retailer": retailer, "listed_price": price,
             "wash_count": washes, "currency": currency, "url": link,
             "price_per_wash": Decimal(str(amount)) / washes,
         })
