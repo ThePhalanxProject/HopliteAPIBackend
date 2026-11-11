@@ -5,7 +5,7 @@ from secrets import token_urlsafe
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -206,14 +206,12 @@ def read_oracle(
 @router.post("/prices")
 def search_prices(
     query: PriceSearch,
-    request: Request,
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
 ):
     language = query.language or message_language(db, user.id)
     db.rollback()
-    client_ip = request.client.host if request.client else None
-    return pilot_prices(query.brand, language, client_ip)
+    return pilot_prices(query.brand, language, query.city, query.country)
 
 
 def provision_participant(db: Session, participant_code: str) -> str:

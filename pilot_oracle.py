@@ -1,7 +1,6 @@
 import logging
 import re
 from decimal import Decimal
-from ipaddress import ip_address
 from math import isfinite
 from os import getenv
 from unicodedata import combining, normalize
@@ -9,7 +8,7 @@ from uuid import uuid4
 
 import requests
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from agent import AgentError, call_hoplite_agent
 
@@ -24,7 +23,21 @@ class OracleMessage(BaseModel):
 
 class PriceSearch(BaseModel):
     brand: str = Field(min_length=2, max_length=100, pattern=r"\S")
+    city: str = Field(min_length=2, max_length=100)
+    country: str = Field(pattern=r"^[a-z]{2}$")
     language: str | None = Field(default=None, pattern=r"^(en|fr)$")
+
+    @field_validator("brand", "city", "country", mode="before")
+    @classmethod
+    def clean_location_input(cls, value):
+        if not isinstance(value, str):
+            return value
+        return value.strip()
+
+    @field_validator("country", mode="before")
+    @classmethod
+    def lowercase_country(cls, value):
+        return value.lower() if isinstance(value, str) else value
 
 
 STOCK_STYLES = (
@@ -90,35 +103,6 @@ WASH_COUNT = re.compile(
 MULTIPACK = re.compile(r"\b(?:lot de|pack of|multipack|[2-9]\s*[x×])\b", re.IGNORECASE)
 
 
-def shopping_location(client_ip: str | None) -> tuple[str, str]:
-    token = getenv("IPINFO_TOKEN")
-    if not token:
-        raise HTTPException(503, "IP location lookup is not configured")
-    try:
-        address = ip_address(client_ip or "")
-    except ValueError:
-        raise HTTPException(422, "Client IP location is unavailable") from None
-    if not address.is_global:
-        raise HTTPException(422, "Client IP location is unavailable")
-    try:
-        response = requests.get(
-            f"https://api.ipinfo.io/lookup/{address}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=5,
-        )
-        response.raise_for_status()
-        geo = response.json()["geo"]
-        country = geo["country_code"].lower()
-        if not re.fullmatch(r"[a-z]{2}", country) or not geo["city"] or not geo["country"]:
-            raise ValueError("Incomplete location")
-        location = ", ".join(dict.fromkeys(
-            part for part in (geo["city"], geo.get("region"), geo["country"]) if part
-        ))
-        return location, country
-    except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError):
-        raise HTTPException(502, "City-level IP location is unavailable") from None
-
-
 def shopping_results(query, location, country, language, key):
     try:
         response = requests.get(
@@ -164,11 +148,10 @@ def matches_brand(row: dict, title: str, requested: list[str]) -> bool:
     return False
 
 
-def pilot_prices(brand, language, client_ip):
+def pilot_prices(brand, language, location, country):
     key = getenv("SERPAPI_API_KEY")
     if not key:
         raise HTTPException(503, "Shopping search is not configured")
-    location, country = shopping_location(client_ip)
     category = "lessive liquide machine lavages" if language == "fr" else "liquid laundry detergent washes"
     reference = "1,5 L" if language == "fr" else "1.5 L"
     rows = shopping_results(f"{brand} {category} {reference}", location, country, language, key)
