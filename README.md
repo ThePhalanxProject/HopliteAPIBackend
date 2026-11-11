@@ -68,8 +68,8 @@ dose remains. Primio must display these responses. No push delivery is configure
 The authenticated `POST /pilot/prices` endpoint takes `{"brand":"Ariel"}`.
 It uses the participant's saved message language unless the request includes
 an explicit language. A 1.5 L liquid laundry pack is the reference product.
-Similar packs of other sizes and brands can rank when the listing title states
-a wash count. Ranking uses listed item price per wash, excluding delivery.
+Only offers matching the selected brand can rank. Different pack sizes can
+qualify when the listing title states a wash count. Ranking uses listed item price per wash, excluding delivery.
 Mixed currencies are not compared.
 
 Set `SERPAPI_API_KEY` and a city-capable IPinfo Core `IPINFO_TOKEN`.

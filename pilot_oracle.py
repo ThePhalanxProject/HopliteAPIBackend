@@ -4,6 +4,7 @@ from decimal import Decimal
 from ipaddress import ip_address
 from math import isfinite
 from os import getenv
+from unicodedata import combining, normalize
 from uuid import uuid4
 
 import requests
@@ -138,6 +139,31 @@ def shopping_results(query, location, country, language, key):
         raise HTTPException(502, "Shopping search is temporarily unavailable") from None
 
 
+def brand_words(value: str) -> list[str]:
+    folded = normalize("NFKD", value.casefold())
+    return re.findall(r"[^\W_]+", "".join(char for char in folded if not combining(char)))
+
+
+def matches_brand(row: dict, title: str, requested: list[str]) -> bool:
+    if not requested:
+        return False
+    listed_brand = row.get("brand")
+    if isinstance(listed_brand, str) and listed_brand.strip():
+        return brand_words(listed_brand) == requested
+
+    words = brand_words(title)
+    if set(words) & {"alternative", "compatible", "equivalent", "replacement", "substitute"}:
+        return False
+    # Listings often begin with a product category before naming the brand.
+    category_prefix = {"lessive", "liquide", "liquid", "laundry", "detergent", "de", "marque"}
+    for index in range(len(words)):
+        if words[index:index + len(requested)] == requested:
+            return True
+        if words[index] not in category_prefix:
+            return False
+    return False
+
+
 def pilot_prices(brand, language, client_ip):
     key = getenv("SERPAPI_API_KEY")
     if not key:
@@ -146,11 +172,12 @@ def pilot_prices(brand, language, client_ip):
     category = "lessive liquide machine lavages" if language == "fr" else "liquid laundry detergent washes"
     reference = "1,5 L" if language == "fr" else "1.5 L"
     rows = shopping_results(f"{brand} {category} {reference}", location, country, language, key)
-    rows += shopping_results(category, location, country, language, key)
+    alternatives = shopping_results(f"{brand} {category}", location, country, language, key)
+    requested_brand = brand_words(brand)
 
     offers = []
     seen_links = set()
-    for row in rows:
+    for row in rows + alternatives:
         if not isinstance(row, dict) or row.get("second_hand_condition"):
             continue
         amount = row.get("extracted_price")
@@ -168,6 +195,7 @@ def pilot_prices(brand, language, client_ip):
             or not isinstance(price, str)
             or not isinstance(title, str)
             or MULTIPACK.search(title)
+            or not matches_brand(row, title, requested_brand)
         ):
             continue
         counts = set(WASH_COUNT.findall(title))
@@ -201,6 +229,7 @@ def pilot_prices(brand, language, client_ip):
             "task": "shopping_update",
             "offer": best,
             "ranking_basis": "listed item price per wash; exclude delivery",
+            "reference_brand": brand,
             "language": language,
         },
         None,
