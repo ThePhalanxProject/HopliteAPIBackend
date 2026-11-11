@@ -149,50 +149,47 @@ def matches_brand(row: dict, title: str, requested: list[str]) -> bool:
     return False
 
 
-# Start with French supermarkets and online grocers serving consumers.
-CONSUMER_RETAILERS = {
-    "fr": {
-        "Auchan": ("auchan.fr",),
-        "Carrefour": ("carrefour.fr",),
-        "Courses U": ("coursesu.com",),
-        "E.Leclerc": ("e.leclerc", "leclercdrive.fr"),
-        "Houra": ("houra.fr",),
-        "Intermarché": ("intermarche.com",),
-        "Monoprix": ("monoprix.fr",),
-    },
-}
-
 BUSINESS_ONLY = re.compile(
-    r"\b(?:b2b|wholesale(?: only)?|grossiste|réservé aux professionnels|"
-    r"professionals only|hors taxes|(?:prix )?ht|excl(?:uding)?[. ]+vat)\b",
+    r"\b(?:b2b|wholesal(?:e|er|ers)|grossist(?:e|es)|"
+    r"réservé aux professionnels|professionals only|trade only|"
+    r"hors taxes|(?:prix )?h\.?\s?t\.?|"
+    r"(?:ex(?:cl(?:uding)?)?\.?[-\s]+vat|without vat|before tax|"
+    r"ex\.?[-\s]+tax|vat not included|iva esclusa|htva))\b",
     re.IGNORECASE,
 )
+BUSINESS_SELLERS = {"kechiq", "kechiq srl", "damiano profumi"}
+BUSINESS_DOMAINS = ("damianoprofumi.it",)
 
 
-def consumer_offer(row, country):
-    retailers = CONSUMER_RETAILERS.get(country, {})
+def consumer_offer(row):
     source = row.get("source")
-    if not isinstance(source, str):
+    if isinstance(source, str):
+        seller = " ".join(brand_words(source))
+        if seller in BUSINESS_SELLERS:
+            return None
+    else:
+        source = None
+
+    metadata = " ".join(
+        str(row.get(field) or "")
+        for field in ("source", "title", "price", "snippet", "extensions", "tag", "badge", "details_and_offers")
+    )
+    if BUSINESS_ONLY.search(metadata):
         return None
-    for retailer, domains in retailers.items():
-        if brand_words(source) not in (brand_words(retailer), *(brand_words(domain) for domain in domains)):
+
+    for link in (row.get("link"), row.get("product_link")):
+        if not isinstance(link, str):
             continue
-        for link in (row.get("link"), row.get("product_link")):
-            if not isinstance(link, str):
-                continue
-            try:
-                url = urlsplit(link)
-            except ValueError:
-                continue
-            host = url.hostname or ""
-            if (
-                url.scheme == "https"
-                and not url.username
-                and not url.password
-                and url.path.strip("/")
-                and any(host == domain or host.endswith("." + domain) for domain in domains)
-            ):
-                return retailer, link
+        try:
+            url = urlsplit(link)
+        except ValueError:
+            continue
+        host = url.hostname or ""
+        if url.scheme != "https" or not host or url.username or url.password:
+            continue
+        if any(host == domain or host.endswith("." + domain) for domain in BUSINESS_DOMAINS):
+            return None
+        return source, link
     return None
 
 
@@ -200,8 +197,6 @@ def pilot_prices(brand, language, location, country):
     key = getenv("SERPAPI_API_KEY")
     if not key:
         raise HTTPException(503, "Shopping search is not configured")
-    if country not in CONSUMER_RETAILERS:
-        raise HTTPException(422, "Consumer retailer comparison is currently available in France")
     category = "lessive liquide machine lavages" if language == "fr" else "liquid laundry detergent washes"
     reference = "1,5 L" if language == "fr" else "1.5 L"
     rows = shopping_results(f"{brand} {category} {reference}", location, country, language, key)
@@ -216,7 +211,7 @@ def pilot_prices(brand, language, location, country):
         amount = row.get("extracted_price")
         price = row.get("price")
         title = row.get("title")
-        consumer = consumer_offer(row, country)
+        consumer = consumer_offer(row)
         if (
             not isinstance(amount, (int, float))
             or isinstance(amount, bool)
@@ -226,7 +221,6 @@ def pilot_prices(brand, language, location, country):
             or not isinstance(price, str)
             or not isinstance(title, str)
             or MULTIPACK.search(title)
-            or BUSINESS_ONLY.search(f"{title} {price} {row.get('snippet') or ''}")
             or not matches_brand(row, title, requested_brand)
         ):
             continue
