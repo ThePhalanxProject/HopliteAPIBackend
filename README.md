@@ -59,7 +59,11 @@ An accepted usage tap earns 5 points. `POST /pilot/pack/refill` takes
 pack to 1,500 g. A refill earns 10 points and starts a new forecast cycle.
 Prior events remain in the account history. Existing taps count at 5 points
 under the new rules. Retry the same event with its original request ID.
-Refill attempts on a full or unstarted pack return 409.
+Refill attempts on a full or unstarted pack return 409. A newly accepted refill
+returns `refill_recorded: true`. A usage or replay response returns false.
+`last_refill_at` is available on pack reads and event responses, and remains
+null until the first refill. `full_doses_remaining` is the server-calculated
+integer wash count for the current stock.
 
 Every 50 cumulative points earns €1 of cashback. The API tracks earned
 cashback without issuing payments or redemptions. Pack responses include

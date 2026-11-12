@@ -33,6 +33,7 @@ class UsageTap(BaseModel):
 
 class PackStatus(BaseModel):
     started_at: datetime | None
+    last_refill_at: datetime | None = None
     current_weight_g: int
     full_doses_remaining: int
     sample_count: int
@@ -47,6 +48,7 @@ class PackStatus(BaseModel):
 
 class UsageResult(PackStatus):
     points_earned: int
+    refill_recorded: bool
     cashback_unlocked_cents: int
     oracle: OracleMessage
 
@@ -139,6 +141,7 @@ def pack_status(db: Session, pack: PilotPack, now: datetime) -> PackStatus:
     elapsed_days = (now - started_at).total_seconds() / 86400 if started_at else 0.0
     result = PackStatus(
         started_at=started_at,
+        last_refill_at=_to_utc(refill_at) if refill_at is not None else None,
         current_weight_g=remaining,
         full_doses_remaining=remaining // DOSE_G,
         sample_count=count,
@@ -241,6 +244,7 @@ def record_pack_event(db, user, request_id, language, *, refill):
     )
     return UsageResult(
         **result.model_dump(), points_earned=points_earned,
+        refill_recorded=refill and duplicate is None,
         cashback_unlocked_cents=unlocked, oracle=oracle,
     )
 
