@@ -310,7 +310,7 @@ def search_prices(
 ):
     language = query.language or message_language(db, user.id)
     db.rollback()
-    return pilot_prices(query.brand, language, query.city, query.country)
+    return pilot_prices(query.brand, language, query.city, query.country, refresh=query.refresh)
 
 
 def provision_participant(db: Session, participant_code: str) -> str:

@@ -123,3 +123,7 @@ token. Display the returned `message` next to Oracle and the linked
 `offers` beneath it. To avoid repeating searches, remember successful
 searches by participant ID and the pack's current `started_at` timestamp.
 An empty offer list is a successful search with no eligible offers.
+
+The **Refresh prices** button calls the same authenticated `POST /pilot/prices`
+endpoint with `"refresh": true` alongside brand, city, and country. This bypasses
+SerpApi's cache for both searches. Automatic searches can omit the field.

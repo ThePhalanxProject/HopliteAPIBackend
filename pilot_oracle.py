@@ -28,6 +28,7 @@ class PriceSearch(BaseModel):
     city: str = Field(min_length=2, max_length=100)
     country: str = Field(pattern=r"^[a-z]{2}$")
     language: str | None = Field(default=None, pattern=r"^(en|fr)$")
+    refresh: bool = False
 
     @field_validator("brand", "city", "country", mode="before")
     @classmethod
@@ -108,14 +109,17 @@ WASH_COUNT = re.compile(
 MULTIPACK = re.compile(r"\b(?:lot de|pack of|multipack|[2-9]\s*[x×])\b", re.IGNORECASE)
 
 
-def shopping_results(query, location, country, language, key):
+def shopping_results(query, location, country, language, key, *, refresh=False):
+    params = {
+        "engine": "google_shopping", "q": query, "location": location,
+        "gl": country, "hl": language, "api_key": key,
+    }
+    if refresh:
+        params["no_cache"] = "true"
     try:
         response = requests.get(
             "https://serpapi.com/search.json",
-            params={
-                "engine": "google_shopping", "q": query, "location": location,
-                "gl": country, "hl": language, "api_key": key,
-            },
+            params=params,
             timeout=8,
         )
         response.raise_for_status()
@@ -197,14 +201,18 @@ def consumer_offer(row):
     return None
 
 
-def pilot_prices(brand, language, location, country):
+def pilot_prices(brand, language, location, country, *, refresh=False):
     key = getenv("SERPAPI_API_KEY")
     if not key:
         raise HTTPException(503, "Shopping search is not configured")
     category = "lessive liquide machine lavages" if language == "fr" else "liquid laundry detergent washes"
     reference = "1,5 L" if language == "fr" else "1.5 L"
-    rows = shopping_results(f"{brand} {category} {reference}", location, country, language, key)
-    alternatives = shopping_results(f"{brand} {category}", location, country, language, key)
+    rows = shopping_results(
+        f"{brand} {category} {reference}", location, country, language, key, refresh=refresh
+    )
+    alternatives = shopping_results(
+        f"{brand} {category}", location, country, language, key, refresh=refresh
+    )
     requested_brand = brand_words(brand)
 
     offers = []
