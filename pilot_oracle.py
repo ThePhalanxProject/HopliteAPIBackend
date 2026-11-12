@@ -213,11 +213,20 @@ def consumer_offer(row):
     return None
 
 
-FULFILLMENT_PREFIX = (
-    r"(?:delivery (?:available )?(?:to|in)|(?:ships|shipping) (?:to|in)|"
-    r"livraison (?:disponible )?(?:a|en|vers)|"
-    r"(?:in store |store )?(?:pickup|pick up) (?:available )?(?:at|in)|"
-    r"retrait (?:en magasin )?(?:disponible )?a)"
+FULFILLMENT_DESTINATION = re.compile(
+    r"(?:available for |free |standard |express )?"
+    r"(?:delivery (?:available |only )?(?:to|in|across)|(?:ships|shipping) (?:to|in|across)|"
+    r"livraison (?:gratuite )?(?:disponible )?(?:a|en|vers)|"
+    r"(?:in store |store )?(?:pickup|pick up) (?:available )?(?:at|in|from)|"
+    r"retrait (?:en magasin )?(?:disponible )?a) (?P<destination>.+)"
+)
+GENERIC_DESTINATION = re.compile(
+    r"(?:(?:your|a|un|votre|domicile|local|nearby|store|magasin|home|nationwide|today|tomorrow|most addresses|nearest store|next [0-9])\b|"
+    r"(?:as little as|up to|moins de|sous)\b|"
+    r"\d+(?: (?:to |a )?\d+)? (?:business |working |ouvrables? )?(?:days?|jours?|hours?|heures?|minutes?)\b)"
+)
+DESTINATION_SUFFIX = re.compile(
+    r"^(?:the )| (?:only|seulement|uniquement)$| (?:by|within|between|sous|entre|pour) .+$"
 )
 
 
@@ -225,30 +234,54 @@ def location_evidence(city: str, country: str, postal_code: str | None) -> re.Pa
     country_record = pycountry.countries.get(alpha_2=country.upper())
     country_names = {country}
     if country_record is not None:
-        country_names.add(country_record.name)
+        country_names.update((country_record.name, country_record.alpha_3))
         if official_name := getattr(country_record, "official_name", None):
             country_names.add(official_name)
+    country_names.update({
+        "fr": {"France métropolitaine", "mainland France"},
+        "gb": {"UK", "Great Britain", "Royaume-Uni"},
+        "us": {"États-Unis"},
+        "de": {"Allemagne"},
+        "es": {"Espagne"},
+        "it": {"Italie"},
+        "be": {"Belgique"},
+        "ch": {"Suisse"},
+    }.get(country, ()))
 
-    city_name = " ".join(brand_words(city))
-    postcode = " ".join(brand_words(postal_code or ""))
-    destinations = [city_name]
-    if postcode:
-        destinations = [f"{postcode} {city_name}", f"{city_name} {postcode}"]
-    destination = "|".join(re.escape(value) for value in destinations)
+    city_name = re.escape(" ".join(brand_words(city)))
+    postcode = "".join(brand_words(postal_code or ""))
+    # A postcode narrows an explicit postcode claim. City-only claims still qualify.
+    postcode_pattern = r" ?".join(re.escape(char) for char in postcode) if postcode else r"\d{4,6}"
+    locality = rf"(?:(?:{postcode_pattern}) )?{city_name}(?: (?:{postcode_pattern}))?"
     countries = "|".join(re.escape(" ".join(brand_words(name))) for name in sorted(country_names))
-    return re.compile(rf"{FULFILLMENT_PREFIX} (?:{destination}) (?:{countries})")
+    return re.compile(rf"(?:{locality}(?: (?:{countries}))?|{countries})")
 
 
-def has_local_fulfillment(row: dict, evidence: re.Pattern) -> bool:
-    # Use offer-level fulfillment details. A localized search alone proves no coverage.
-    for field in ("delivery", "details_and_offers", "extensions"):
+def conflicts_with_location(row: dict, evidence: re.Pattern) -> bool:
+    # Only fulfillment details can provide a destination. Seller names, domains,
+    # currency and generic shipping claims are not geographic evidence.
+    seller = row.get("source")
+    seller_name = " ".join(brand_words(seller)) if isinstance(seller, str) else ""
+    for field in ("delivery", "shipping", "details_and_offers", "extensions"):
         values = row.get(field)
         if isinstance(values, str):
             values = [values]
-        if isinstance(values, list) and any(
-            isinstance(value, str) and evidence.fullmatch(" ".join(brand_words(value)))
-            for value in values
-        ):
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            detail = " ".join(brand_words(value))
+            match = FULFILLMENT_DESTINATION.fullmatch(detail)
+            if match is None:
+                continue
+            destination = DESTINATION_SUFFIX.sub("", match["destination"])
+            if (
+                evidence.fullmatch(destination)
+                or GENERIC_DESTINATION.match(destination)
+                or destination == seller_name
+            ):
+                continue
             return True
     return False
 
@@ -287,7 +320,7 @@ def pilot_prices(brand, language, location, country, *, refresh=False, postal_co
             or not isinstance(title, str)
             or MULTIPACK.search(title)
             or not matches_brand(row, title, requested_brand)
-            or not has_local_fulfillment(row, evidence)
+            or conflicts_with_location(row, evidence)
         ):
             continue
         retailer, link = consumer
@@ -317,9 +350,9 @@ def pilot_prices(brand, language, location, country, *, refresh=False, postal_co
     result = {"location": location, "reference_brand": brand, "reference_volume_l": 1.5, "offers": offers}
     if not offers:
         message = (
-            f"Je n’ai trouvé aucune offre {brand} dont la disponibilité est confirmée à {location} ({country.upper()})."
+            f"Je n’ai trouvé aucune offre {brand} correspondant à votre recherche à {location} ({country.upper()})."
             if language == "fr"
-            else f"I couldn’t verify any {brand} offers available in {location} ({country.upper()})."
+            else f"I couldn’t find any {brand} offers matching your search in {location} ({country.upper()})."
         )
         return {**result, "message": message, "message_source": "fallback"}
 
