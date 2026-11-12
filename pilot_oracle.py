@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 class OracleMessage(BaseModel):
     stock_status: str
+    refill_alert_message: str | None = None
     message: str | None
     source: str
 
@@ -94,7 +95,10 @@ def stock_message(
         generate=generate,
     )
     source = "kimi" if message else "unavailable" if generate else "skipped"
-    return OracleMessage(stock_status=state, message=message, source=source)
+    return OracleMessage(
+        stock_status=state, message=message, source=source,
+        refill_alert_message=pack.refill_alert_message,
+    )
 
 
 WASH_COUNT = re.compile(

@@ -15,13 +15,17 @@ from sqlalchemy.orm import Session
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, pilot_prices, stock_message
 from database import Base, SessionLocal, engine
-from models import PilotMessagePreference, PilotPack, PilotRefillEvent, PilotSession, PilotUsageEvent, PilotUser
+from models import PilotMessagePreference, PilotPack, PilotRefillAlert, PilotRefillEvent, PilotSession, PilotUsageEvent, PilotUser
 
 CAPACITY_ML = 1500
 DOSE_ML = 65
 USAGE_POINTS = 5
 REFILL_POINTS = 10
 POINTS_PER_EURO = 50
+REFILL_ALERT_MESSAGES = {
+    "en": "Your detergent is running low. Please refill your Hoplite.",
+    "fr": "Votre lessive est presque épuisée. Pensez à recharger votre Hoplite.",
+}
 
 router = APIRouter(prefix="/pilot", tags=["pilot"])
 bearer = HTTPBearer(auto_error=False)
@@ -46,6 +50,8 @@ class PackStatus(BaseModel):
     consumption_rate_l_day: float | None = None
     days_remaining: float | None = None
     estimated_runout_at: datetime | None = None
+    refill_needed: bool = False
+    refill_alert_message: str | None = None
 
     @computed_field
     @property
@@ -54,18 +60,13 @@ class PackStatus(BaseModel):
             return "not_started"
         if self.current_volume_l == 0:
             return "empty"
-        if self.full_doses_remaining == 0 or (
+        if self.full_doses_remaining < 3 or (
             self.days_remaining is not None and self.days_remaining <= 3
         ):
             return "urgent"
-        if self.days_remaining is not None and self.days_remaining <= 7:
+        if self.refill_needed or (self.days_remaining is not None and self.days_remaining <= 7):
             return "low"
         return "ok"
-
-    @computed_field
-    @property
-    def refill_needed(self) -> bool:
-        return self.stock_status in {"low", "urgent", "empty"}
 
 
 class UsageResult(PackStatus):
@@ -137,7 +138,7 @@ def get_pack(db: Session, user: PilotUser, *, lock: bool = False) -> PilotPack:
     return pack
 
 
-def pack_status(db: Session, pack: PilotPack, now: datetime) -> PackStatus:
+def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> PackStatus:
     refills = select(
         func.count(PilotRefillEvent.id).label("refill_count"),
         func.max(PilotRefillEvent.after_usage_id).label("last_refill_usage"),
@@ -183,12 +184,26 @@ def pack_status(db: Session, pack: PilotPack, now: datetime) -> PackStatus:
         if remaining > 0:
             result.days_remaining = remaining / rate
             result.estimated_runout_at = now + timedelta(days=result.days_remaining)
+    alert = db.get(PilotRefillAlert, pack.id)
+    active = alert is not None and _to_utc(alert.cycle_started_at) == started_at
+    if not active and result.stock_status in {"low", "urgent", "empty"}:
+        if alert is None:
+            db.add(PilotRefillAlert(pack_id=pack.id, cycle_started_at=started_at))
+        else:
+            alert.cycle_started_at = started_at
+        active = True
+    if active:
+        result.refill_needed = True
+        result.refill_alert_message = REFILL_ALERT_MESSAGES[language]
     return result
 
 
 @router.get("/pack", response_model=PackStatus)
 def read_pack(user: PilotUser = Depends(participant), db: Session = Depends(get_db)):
-    return pack_status(db, get_pack(db, user), datetime.now(timezone.utc))
+    pack = get_pack(db, user, lock=True)
+    result = pack_status(db, pack, datetime.now(timezone.utc), message_language(db, user.id))
+    db.commit()
+    return result
 
 
 @router.post("/pack/start", response_model=PackStatus)
@@ -197,7 +212,7 @@ def start_pack(user: PilotUser = Depends(participant), db: Session = Depends(get
     now = datetime.now(timezone.utc)
     if pack.started_at is None:
         pack.started_at = now
-    result = pack_status(db, pack, now)
+    result = pack_status(db, pack, now, message_language(db, user.id))
     db.commit()
     return result
 
@@ -233,7 +248,8 @@ def record_pack_event(db, user, request_id, language, *, refill):
         model.pack_id == pack.id, model.request_id == request_id
     ))
     now = datetime.now(timezone.utc)
-    before = pack_status(db, pack, now)
+    language = language or message_language(db, user.id)
+    before = pack_status(db, pack, now, language)
     result = before
     points_earned = 0
     if duplicate is None:
@@ -258,9 +274,8 @@ def record_pack_event(db, user, request_id, language, *, refill):
             ))
             points_earned = USAGE_POINTS
         db.flush()
-        result = pack_status(db, pack, now)
+        result = pack_status(db, pack, now, language)
 
-    language = language or message_language(db, user.id)
     db.commit()
     unlocked = result.cashback_earned_cents - before.cashback_earned_cents
     oracle = stock_message(
@@ -280,9 +295,10 @@ def read_oracle(
     db: Session = Depends(get_db),
     language: str | None = Query(None, pattern="^(en|fr)$"),
 ):
-    status = pack_status(db, get_pack(db, user), datetime.now(timezone.utc))
+    pack = get_pack(db, user, lock=True)
     language = language or message_language(db, user.id)
-    db.rollback()
+    status = pack_status(db, pack, datetime.now(timezone.utc), language)
+    db.commit()
     return stock_message(status, language)
 
 

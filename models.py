@@ -90,3 +90,10 @@ class PilotRefillEvent(Base):
     request_id = Column(String(36), nullable=False)
     after_usage_id = Column(ForeignKey("pilot_usage_events.id"), nullable=False)
     occurred_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class PilotRefillAlert(Base):
+    __tablename__ = "pilot_refill_alerts"
+
+    pack_id = Column(ForeignKey("pilot_packs.id"), primary_key=True)
+    cycle_started_at = Column(DateTime(timezone=True), nullable=False)

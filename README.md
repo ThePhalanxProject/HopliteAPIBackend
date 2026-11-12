@@ -111,8 +111,11 @@ accounts must enroll to get a backend session.
 
 Pack status and usage/refill responses include `stock_status` and
 `refill_needed`. The flag is true for a forecast of seven days or less,
-less than one full dose, or empty stock. A refill restores full stock and
-clears the flag.
+fewer than three full washes, or empty stock. Once triggered, the flag remains
+true for the current pack cycle, even when the forecast changes. A successful
+refill starts a new cycle and clears the flag. Show `refill_alert_message`
+beside Oracle while the flag is true. It is also present in Oracle responses
+and stays available when the agent is offline.
 
 When the flag is true, Primio can automatically send the user's selected
 brand and shopping location to `POST /pilot/prices` with the same bearer
