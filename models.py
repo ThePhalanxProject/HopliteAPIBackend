@@ -78,3 +78,14 @@ class PilotSession(Base):
     token_hash = Column(String(64), primary_key=True)
     user_id = Column(ForeignKey("pilot_users.id"), nullable=False, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class PilotRefillEvent(Base):
+    __tablename__ = "pilot_refill_events"
+    __table_args__ = (UniqueConstraint("pack_id", "request_id"),)
+
+    id = Column(Integer, primary_key=True)
+    pack_id = Column(ForeignKey("pilot_packs.id"), nullable=False)
+    request_id = Column(String(36), nullable=False)
+    after_usage_id = Column(ForeignKey("pilot_usage_events.id"), nullable=False)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)

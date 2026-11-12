@@ -54,16 +54,21 @@ The pilot endpoints do not send notifications.
 
 ### Pilot Oracle and price search
 
-Usage responses include `user_points`, `points_earned`, and `oracle`. One
-point is credited for each accepted tap, including historical taps already
-stored in the database. Retrying a request returns zero new points. Stock
-messages are available on tap or through `GET /pilot/pack/oracle`, and both
-accept `?language=en` or `?language=fr`. The pilot uses the existing Hostman
-agent configuration to generate the entire stock message, including the earned
-point after a new tap. The API returns a null message if the agent is offline
-or the request is a retry. The balance and points remain available.
-Low stock starts at seven days, urgent at three days or when less than one
-dose remains. Primio must display these responses. No push delivery is configured.
+An accepted usage tap earns 5 points. `POST /pilot/pack/refill` takes
+`{"request_id":"<UUID>"}` and restores an activated, partially used or empty
+pack to 1,500 g. A refill earns 10 points and starts a new forecast cycle.
+Prior events remain in the account history. Existing taps count at 5 points
+under the new rules. Retry the same event with its original request ID.
+Refill attempts on a full or unstarted pack return 409.
+
+Every 50 cumulative points earns €1 of cashback. The API tracks earned
+cashback without issuing payments or redemptions. Pack responses include
+`user_points`, `cashback_earned_cents`, and `points_to_next_cashback`.
+Usage and refill responses also include `points_earned`,
+`cashback_unlocked_cents`, and `oracle`. A retry earns zero additional
+points and cashback. Oracle generates a message with the outcome and reward
+progress in the participant's saved language. If Kimi is unavailable, the
+structured stock and reward fields are still returned with a null message.
 
 The authenticated `POST /pilot/prices` endpoint takes the brand and shopping
 location from Primio, for example

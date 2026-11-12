@@ -67,7 +67,9 @@ def oracle_copy(payload, fallback, *, generate=True):
     return fallback, "fallback"
 
 
-def stock_message(pack, language, *, points_earned=0, generate=True):
+def stock_message(
+    pack, language, *, points_earned=0, cashback_unlocked_cents=0, event=None, generate=True
+):
     days = pack.days_remaining
     if pack.started_at is None:
         state = "not_started"
@@ -85,7 +87,12 @@ def stock_message(pack, language, *, points_earned=0, generate=True):
             "task": "stock_update",
             "stock_status": state,
             "days_remaining": days,
+            "event": event,
             "points_earned": points_earned,
+            "total_points": pack.user_points,
+            "cashback_earned_cents": pack.cashback_earned_cents,
+            "cashback_unlocked_cents": cashback_unlocked_cents,
+            "points_to_next_cashback": pack.points_to_next_cashback,
             "language": language,
             "style": STOCK_STYLES[pack.sample_count % len(STOCK_STYLES)],
             "variation_id": str(uuid4()),

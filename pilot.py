@@ -15,10 +15,13 @@ from sqlalchemy.orm import Session
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, pilot_prices, stock_message
 from database import Base, SessionLocal, engine
-from models import PilotMessagePreference, PilotPack, PilotSession, PilotUsageEvent, PilotUser
+from models import PilotMessagePreference, PilotPack, PilotRefillEvent, PilotSession, PilotUsageEvent, PilotUser
 
 STARTING_WEIGHT_G = 1500
 DOSE_G = 65
+USAGE_POINTS = 5
+REFILL_POINTS = 10
+POINTS_PER_EURO = 50
 
 router = APIRouter(prefix="/pilot", tags=["pilot"])
 bearer = HTTPBearer(auto_error=False)
@@ -34,6 +37,8 @@ class PackStatus(BaseModel):
     full_doses_remaining: int
     sample_count: int
     user_points: int
+    cashback_earned_cents: int
+    points_to_next_cashback: int
     data_span_days: float
     consumption_rate_g_day: float | None = None
     days_remaining: float | None = None
@@ -42,6 +47,7 @@ class PackStatus(BaseModel):
 
 class UsageResult(PackStatus):
     points_earned: int
+    cashback_unlocked_cents: int
     oracle: OracleMessage
 
 
@@ -108,22 +114,37 @@ def get_pack(db: Session, user: PilotUser, *, lock: bool = False) -> PilotPack:
 
 
 def pack_status(db: Session, pack: PilotPack, now: datetime) -> PackStatus:
-    count, grams_used, last_use = db.execute(
+    refills = select(
+        func.count(PilotRefillEvent.id).label("refill_count"),
+        func.max(PilotRefillEvent.after_usage_id).label("last_refill_usage"),
+        func.max(PilotRefillEvent.occurred_at).label("last_refill_at"),
+    ).where(PilotRefillEvent.pack_id == pack.id).cte()
+    current_cycle = PilotUsageEvent.id > func.coalesce(refills.c.last_refill_usage, 0)
+    count, grams_used, last_use, usage_count, refill_count, refill_at = db.execute(
         select(
+            func.count(PilotUsageEvent.id).filter(current_cycle),
+            func.coalesce(func.sum(PilotUsageEvent.grams_used).filter(current_cycle), 0),
+            func.max(PilotUsageEvent.occurred_at).filter(current_cycle),
             func.count(PilotUsageEvent.id),
-            func.coalesce(func.sum(PilotUsageEvent.grams_used), 0),
-            func.max(PilotUsageEvent.occurred_at),
-        ).where(PilotUsageEvent.pack_id == pack.id)
+            refills.c.refill_count,
+            refills.c.last_refill_at,
+        ).select_from(refills).outerjoin(
+            PilotUsageEvent, PilotUsageEvent.pack_id == pack.id
+        ).group_by(refills.c.refill_count, refills.c.last_refill_at)
     ).one()
     remaining = STARTING_WEIGHT_G - grams_used
-    started_at = _to_utc(pack.started_at) if pack.started_at is not None else None
+    points = usage_count * USAGE_POINTS + refill_count * REFILL_POINTS
+    cycle_start = refill_at or pack.started_at
+    started_at = _to_utc(cycle_start) if cycle_start is not None else None
     elapsed_days = (now - started_at).total_seconds() / 86400 if started_at else 0.0
     result = PackStatus(
         started_at=started_at,
         current_weight_g=remaining,
         full_doses_remaining=remaining // DOSE_G,
         sample_count=count,
-        user_points=count,
+        user_points=points,
+        cashback_earned_cents=(points // POINTS_PER_EURO) * 100,
+        points_to_next_cashback=POINTS_PER_EURO - points % POINTS_PER_EURO,
         data_span_days=elapsed_days,
     )
     if remaining == 0:
@@ -161,37 +182,66 @@ def record_usage(
     db: Session = Depends(get_db),
     language: str | None = Query(None, pattern="^(en|fr)$"),
 ):
+    return record_pack_event(db, user, tap.request_id, language, refill=False)
+
+
+@router.post("/pack/refill", response_model=UsageResult)
+def record_refill(
+    event: UsageTap,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+    language: str | None = Query(None, pattern="^(en|fr)$"),
+):
+    return record_pack_event(db, user, event.request_id, language, refill=True)
+
+
+def record_pack_event(db, user, request_id, language, *, refill):
     pack = get_pack(db, user, lock=True)
     if pack.started_at is None:
-        raise HTTPException(409, "Start the pilot pack before logging usage")
+        raise HTTPException(409, "Start the pilot pack before logging events")
 
-    request_id = str(tap.request_id)
-    duplicate = db.scalar(select(PilotUsageEvent.id).where(
-        PilotUsageEvent.pack_id == pack.id,
-        PilotUsageEvent.request_id == request_id,
+    model = PilotRefillEvent if refill else PilotUsageEvent
+    request_id = str(request_id)
+    duplicate = db.scalar(select(model.id).where(
+        model.pack_id == pack.id, model.request_id == request_id
     ))
     now = datetime.now(timezone.utc)
-    result = pack_status(db, pack, now)
+    before = pack_status(db, pack, now)
+    result = before
+    points_earned = 0
     if duplicate is None:
-        if result.current_weight_g == 0:
-            raise HTTPException(409, "The pilot pack is empty")
-        db.add(PilotUsageEvent(
-            pack_id=pack.id,
-            request_id=request_id,
-            grams_used=min(DOSE_G, result.current_weight_g),
-            occurred_at=now,
-        ))
+        if refill:
+            if before.current_weight_g == STARTING_WEIGHT_G:
+                raise HTTPException(409, "The pilot pack is already full")
+            latest_usage_id = db.scalar(select(func.max(PilotUsageEvent.id)).where(
+                PilotUsageEvent.pack_id == pack.id
+            ))
+            db.add(PilotRefillEvent(
+                pack_id=pack.id, request_id=request_id, after_usage_id=latest_usage_id,
+                occurred_at=now,
+            ))
+            points_earned = REFILL_POINTS
+        else:
+            if before.current_weight_g == 0:
+                raise HTTPException(409, "The pilot pack is empty")
+            db.add(PilotUsageEvent(
+                pack_id=pack.id, request_id=request_id,
+                grams_used=min(DOSE_G, before.current_weight_g), occurred_at=now,
+            ))
+            points_earned = USAGE_POINTS
         db.flush()
         result = pack_status(db, pack, now)
+
     language = language or message_language(db, user.id)
     db.commit()
-
-    points_earned = int(duplicate is None)
+    unlocked = result.cashback_earned_cents - before.cashback_earned_cents
     oracle = stock_message(
-        result, language, points_earned=points_earned, generate=bool(points_earned)
+        result, language, points_earned=points_earned, cashback_unlocked_cents=unlocked,
+        event="refill" if refill else "usage", generate=bool(points_earned),
     )
     return UsageResult(
-        **result.model_dump(), points_earned=points_earned, oracle=oracle
+        **result.model_dump(), points_earned=points_earned,
+        cashback_unlocked_cents=unlocked, oracle=oracle,
     )
 
 
