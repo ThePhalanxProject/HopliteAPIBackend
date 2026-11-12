@@ -7,6 +7,7 @@ from unicodedata import combining, normalize
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+import pycountry
 import requests
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -27,10 +28,11 @@ class PriceSearch(BaseModel):
     brand: str = Field(min_length=2, max_length=100, pattern=r"\S")
     city: str = Field(min_length=2, max_length=100)
     country: str = Field(pattern=r"^[a-z]{2}$")
+    postal_code: str | None = Field(default=None, max_length=16, pattern=r"^[A-Za-z0-9][A-Za-z0-9 -]*$")
     language: str | None = Field(default=None, pattern=r"^(en|fr)$")
     refresh: bool = False
 
-    @field_validator("brand", "city", "country", mode="before")
+    @field_validator("brand", "city", "country", "postal_code", mode="before")
     @classmethod
     def clean_location_input(cls, value):
         if not isinstance(value, str):
@@ -211,7 +213,47 @@ def consumer_offer(row):
     return None
 
 
-def pilot_prices(brand, language, location, country, *, refresh=False):
+FULFILLMENT_PREFIX = (
+    r"(?:delivery (?:available )?(?:to|in)|(?:ships|shipping) (?:to|in)|"
+    r"livraison (?:disponible )?(?:a|en|vers)|"
+    r"(?:in store |store )?(?:pickup|pick up) (?:available )?(?:at|in)|"
+    r"retrait (?:en magasin )?(?:disponible )?a)"
+)
+
+
+def location_evidence(city: str, country: str, postal_code: str | None) -> re.Pattern:
+    country_record = pycountry.countries.get(alpha_2=country.upper())
+    country_names = {country}
+    if country_record is not None:
+        country_names.add(country_record.name)
+        if official_name := getattr(country_record, "official_name", None):
+            country_names.add(official_name)
+
+    city_name = " ".join(brand_words(city))
+    postcode = " ".join(brand_words(postal_code or ""))
+    destinations = [city_name]
+    if postcode:
+        destinations = [f"{postcode} {city_name}", f"{city_name} {postcode}"]
+    destination = "|".join(re.escape(value) for value in destinations)
+    countries = "|".join(re.escape(" ".join(brand_words(name))) for name in sorted(country_names))
+    return re.compile(rf"{FULFILLMENT_PREFIX} (?:{destination}) (?:{countries})")
+
+
+def has_local_fulfillment(row: dict, evidence: re.Pattern) -> bool:
+    # Use offer-level fulfillment details. A localized search alone proves no coverage.
+    for field in ("delivery", "details_and_offers", "extensions"):
+        values = row.get(field)
+        if isinstance(values, str):
+            values = [values]
+        if isinstance(values, list) and any(
+            isinstance(value, str) and evidence.fullmatch(" ".join(brand_words(value)))
+            for value in values
+        ):
+            return True
+    return False
+
+
+def pilot_prices(brand, language, location, country, *, refresh=False, postal_code=None):
     key = getenv("SERPAPI_API_KEY")
     if not key:
         raise HTTPException(503, "Shopping search is not configured")
@@ -224,6 +266,7 @@ def pilot_prices(brand, language, location, country, *, refresh=False):
         f"{brand} {category}", location, country, language, key, refresh=refresh
     )
     requested_brand = brand_words(brand)
+    evidence = location_evidence(location, country, postal_code)
 
     offers = []
     seen_links = set()
@@ -244,6 +287,7 @@ def pilot_prices(brand, language, location, country, *, refresh=False):
             or not isinstance(title, str)
             or MULTIPACK.search(title)
             or not matches_brand(row, title, requested_brand)
+            or not has_local_fulfillment(row, evidence)
         ):
             continue
         retailer, link = consumer
@@ -272,7 +316,12 @@ def pilot_prices(brand, language, location, country, *, refresh=False):
         offer["price_per_wash"] = float(round(offer["price_per_wash"], 4))
     result = {"location": location, "reference_brand": brand, "reference_volume_l": 1.5, "offers": offers}
     if not offers:
-        return {**result, "message": None, "message_source": None}
+        message = (
+            f"Je n’ai trouvé aucune offre {brand} dont la disponibilité est confirmée à {location} ({country.upper()})."
+            if language == "fr"
+            else f"I couldn’t verify any {brand} offers available in {location} ({country.upper()})."
+        )
+        return {**result, "message": message, "message_source": "fallback"}
 
     best = offers[0]
     message, source = oracle_copy(
