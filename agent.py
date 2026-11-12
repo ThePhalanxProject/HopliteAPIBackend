@@ -63,9 +63,15 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
         )
     elif pilot_mode:
         instruction = (
-            "Write one short consumer-facing sentence for the Hoplite pilot. "
+            "Write a brief consumer-facing update for the Hoplite pilot in at most 270 characters. "
             "For a stock update, use the supplied status and approximate days remaining if available. "
             "Write fresh wording each time. Vary the opening and sentence structure using the style provided. "
+            "For usage events, welcome the user back if days_since_previous_use is supplied. "
+            "If rapid_usage is true, mention the supplied number of uses in the past hour neutrally. "
+            "When stock_milestone_percent is supplied, call out crossing that remaining-stock threshold. "
+            "Below half capacity, describe the declining stock using full_doses_remaining if useful, "
+            "and say the pack is empty if stock_status is empty. "
+            "Use only supplied facts, and do not guess why usage changed. "
             "If points_earned is positive, state exactly how many points this event earned. "
             "For a refill, confirm the pack was refilled to the supplied capacity in litres. If you mention the remaining amount, use litres. If you mention the amount used per wash, use millilitres. "
             "If cashback_unlocked_cents is positive, state the newly unlocked cashback in euros "

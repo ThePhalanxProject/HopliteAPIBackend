@@ -70,7 +70,8 @@ def oracle_copy(payload, fallback, *, generate=True):
 
 
 def stock_message(
-    pack, language, *, points_earned=0, cashback_unlocked_cents=0, event=None, generate=True
+    pack, language, *, points_earned=0, cashback_unlocked_cents=0, event=None,
+    usage_context=None, generate=True
 ):
     state = pack.stock_status
 
@@ -82,6 +83,9 @@ def stock_message(
             "current_volume_l": pack.current_volume_l,
             "capacity_l": pack.capacity_l,
             "dose_ml": pack.dose_ml,
+            "full_doses_remaining": pack.full_doses_remaining,
+            "stock_remaining_percent": round(pack.current_volume_l / pack.capacity_l * 100, 1),
+            "usage_context": usage_context,
             "event": event,
             "points_earned": points_earned,
             "total_points": pack.user_points,

@@ -237,6 +237,23 @@ def record_refill(
     return record_pack_event(db, user, event.request_id, language, refill=True)
 
 
+def usage_message_context(db: Session, pack_id: int, before: PackStatus, now: datetime) -> dict:
+    hour_start = max(before.started_at, now - timedelta(hours=1))
+    last_use, recent_count = db.execute(
+        select(
+            func.max(PilotUsageEvent.occurred_at),
+            func.count(PilotUsageEvent.id).filter(PilotUsageEvent.occurred_at >= hour_start),
+        ).where(PilotUsageEvent.pack_id == pack_id)
+    ).one()
+    elapsed = now - _to_utc(last_use) if last_use is not None else None
+    days_away = elapsed.days if elapsed is not None and elapsed >= timedelta(days=7) else None
+    return {
+        "days_since_previous_use": days_away,
+        "rapid_usage": recent_count + 1 >= 3,
+        "uses_in_last_hour": recent_count + 1,
+    }
+
+
 def record_pack_event(db, user, request_id, language, *, refill):
     pack = get_pack(db, user, lock=True)
     if pack.started_at is None:
@@ -252,6 +269,7 @@ def record_pack_event(db, user, request_id, language, *, refill):
     before = pack_status(db, pack, now, language)
     result = before
     points_earned = 0
+    usage_context = None
     if duplicate is None:
         if refill:
             if before.current_volume_l == before.capacity_l:
@@ -267,6 +285,7 @@ def record_pack_event(db, user, request_id, language, *, refill):
         else:
             if before.current_volume_l == 0:
                 raise HTTPException(409, "The pilot pack is empty")
+            usage_context = usage_message_context(db, pack.id, before, now)
             db.add(PilotUsageEvent(
                 pack_id=pack.id, request_id=request_id,
                 volume_used_ml=min(DOSE_ML, round(before.current_volume_l * 1000)),
@@ -275,12 +294,20 @@ def record_pack_event(db, user, request_id, language, *, refill):
             points_earned = USAGE_POINTS
         db.flush()
         result = pack_status(db, pack, now, language)
+        if usage_context is not None:
+            previous_pct = before.current_volume_l / before.capacity_l * 100
+            remaining_pct = result.current_volume_l / result.capacity_l * 100
+            usage_context["stock_milestone_percent"] = next(
+                (level for level in (10, 25, 50) if remaining_pct <= level < previous_pct),
+                None,
+            )
 
     db.commit()
     unlocked = result.cashback_earned_cents - before.cashback_earned_cents
     oracle = stock_message(
         result, language, points_earned=points_earned, cashback_unlocked_cents=unlocked,
-        event="refill" if refill else "usage", generate=bool(points_earned),
+        event="refill" if refill else "usage", usage_context=usage_context,
+        generate=bool(points_earned),
     )
     return UsageResult(
         **result.model_dump(exclude_computed_fields=True), points_earned=points_earned,
