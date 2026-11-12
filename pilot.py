@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -46,6 +46,26 @@ class PackStatus(BaseModel):
     consumption_rate_l_day: float | None = None
     days_remaining: float | None = None
     estimated_runout_at: datetime | None = None
+
+    @computed_field
+    @property
+    def stock_status(self) -> Literal["not_started", "ok", "low", "urgent", "empty"]:
+        if self.started_at is None:
+            return "not_started"
+        if self.current_volume_l == 0:
+            return "empty"
+        if self.full_doses_remaining == 0 or (
+            self.days_remaining is not None and self.days_remaining <= 3
+        ):
+            return "urgent"
+        if self.days_remaining is not None and self.days_remaining <= 7:
+            return "low"
+        return "ok"
+
+    @computed_field
+    @property
+    def refill_needed(self) -> bool:
+        return self.stock_status in {"low", "urgent", "empty"}
 
 
 class UsageResult(PackStatus):
@@ -248,7 +268,7 @@ def record_pack_event(db, user, request_id, language, *, refill):
         event="refill" if refill else "usage", generate=bool(points_earned),
     )
     return UsageResult(
-        **result.model_dump(), points_earned=points_earned,
+        **result.model_dump(exclude_computed_fields=True), points_earned=points_earned,
         refill_recorded=refill and duplicate is None,
         cashback_unlocked_cents=unlocked, oracle=oracle,
     )

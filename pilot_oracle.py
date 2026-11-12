@@ -70,23 +70,13 @@ def oracle_copy(payload, fallback, *, generate=True):
 def stock_message(
     pack, language, *, points_earned=0, cashback_unlocked_cents=0, event=None, generate=True
 ):
-    days = pack.days_remaining
-    if pack.started_at is None:
-        state = "not_started"
-    elif pack.current_volume_l == 0:
-        state = "empty"
-    elif pack.full_doses_remaining == 0 or (days is not None and days <= 3):
-        state = "urgent"
-    elif days is not None and days <= 7:
-        state = "low"
-    else:
-        state = "ok"
+    state = pack.stock_status
 
     message, _ = oracle_copy(
         {
             "task": "stock_update",
             "stock_status": state,
-            "days_remaining": days,
+            "days_remaining": pack.days_remaining,
             "current_volume_l": pack.current_volume_l,
             "capacity_l": pack.capacity_l,
             "dose_ml": pack.dose_ml,

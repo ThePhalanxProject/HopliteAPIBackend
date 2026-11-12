@@ -106,3 +106,17 @@ Subsequent logins create a seven-day bearer session accepted by the existing
 pilot endpoints. Logout revokes that session when the backend is reachable.
 Existing pilot tokens continue to work for API testing. Local-only Primio user
 accounts must enroll to get a backend session.
+
+### Refill recommendations in Primio
+
+Pack status and usage/refill responses include `stock_status` and
+`refill_needed`. The flag is true for a forecast of seven days or less,
+less than one full dose, or empty stock. A refill restores full stock and
+clears the flag.
+
+When the flag is true, Primio can automatically send the user's selected
+brand and shopping location to `POST /pilot/prices` with the same bearer
+token. Display the returned `message` next to Oracle and the linked
+`offers` beneath it. To avoid repeating searches, remember successful
+searches by participant ID and the pack's current `started_at` timestamp.
+An empty offer list is a successful search with no eligible offers.
