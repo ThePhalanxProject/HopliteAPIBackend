@@ -127,3 +127,14 @@ An empty offer list is a successful search with no eligible offers.
 The **Refresh prices** button calls the same authenticated `POST /pilot/prices`
 endpoint with `"refresh": true` alongside brand, city, and country. This bypasses
 SerpApi's cache for both searches. Automatic searches can omit the field.
+
+### Fast usage taps
+
+For immediate stock and points, call `POST /pilot/pack/usage?defer_oracle=true`
+with the usual request UUID. The response includes `oracle_url` and commits
+the usage before any Kimi call. Update the UI from that response, then make a
+separate authenticated POST to `oracle_url` with no body and display its
+`message` when ready. The message uses the original tap's context, and a
+successfully generated message is reused if requested again. Keep the refill
+alert driven by the current pack response. Requests that omit `defer_oracle`
+continue to receive the Oracle message inline.

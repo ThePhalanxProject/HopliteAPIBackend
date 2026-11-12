@@ -69,39 +69,45 @@ def oracle_copy(payload, fallback, *, generate=True):
     return fallback, "fallback"
 
 
+def stock_message_payload(
+    pack, language, *, points_earned=0, cashback_unlocked_cents=0,
+    event=None, usage_context=None,
+):
+    return {
+        "task": "stock_update",
+        "stock_status": pack.stock_status,
+        "days_remaining": pack.days_remaining,
+        "current_volume_l": pack.current_volume_l,
+        "capacity_l": pack.capacity_l,
+        "dose_ml": pack.dose_ml,
+        "full_doses_remaining": pack.full_doses_remaining,
+        "stock_remaining_percent": round(pack.current_volume_l / pack.capacity_l * 100, 1),
+        "usage_context": usage_context,
+        "event": event,
+        "points_earned": points_earned,
+        "total_points": pack.user_points,
+        "cashback_earned_cents": pack.cashback_earned_cents,
+        "cashback_unlocked_cents": cashback_unlocked_cents,
+        "points_to_next_cashback": pack.points_to_next_cashback,
+        "language": language,
+        "style": STOCK_STYLES[pack.sample_count % len(STOCK_STYLES)],
+        "variation_id": str(uuid4()),
+    }
+
+
 def stock_message(
     pack, language, *, points_earned=0, cashback_unlocked_cents=0, event=None,
     usage_context=None, generate=True
 ):
-    state = pack.stock_status
-
-    message, _ = oracle_copy(
-        {
-            "task": "stock_update",
-            "stock_status": state,
-            "days_remaining": pack.days_remaining,
-            "current_volume_l": pack.current_volume_l,
-            "capacity_l": pack.capacity_l,
-            "dose_ml": pack.dose_ml,
-            "full_doses_remaining": pack.full_doses_remaining,
-            "stock_remaining_percent": round(pack.current_volume_l / pack.capacity_l * 100, 1),
-            "usage_context": usage_context,
-            "event": event,
-            "points_earned": points_earned,
-            "total_points": pack.user_points,
-            "cashback_earned_cents": pack.cashback_earned_cents,
-            "cashback_unlocked_cents": cashback_unlocked_cents,
-            "points_to_next_cashback": pack.points_to_next_cashback,
-            "language": language,
-            "style": STOCK_STYLES[pack.sample_count % len(STOCK_STYLES)],
-            "variation_id": str(uuid4()),
-        },
-        None,
-        generate=generate,
+    payload = stock_message_payload(
+        pack, language, points_earned=points_earned,
+        cashback_unlocked_cents=cashback_unlocked_cents, event=event,
+        usage_context=usage_context,
     )
+    message, _ = oracle_copy(payload, None, generate=generate)
     source = "kimi" if message else "unavailable" if generate else "skipped"
     return OracleMessage(
-        stock_status=state, message=message, source=source,
+        stock_status=pack.stock_status, message=message, source=source,
         refill_alert_message=pack.refill_alert_message,
     )
 

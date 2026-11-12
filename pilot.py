@@ -8,14 +8,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, computed_field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from consumption import _to_utc
-from pilot_oracle import OracleMessage, PriceSearch, pilot_prices, stock_message
+from pilot_oracle import OracleMessage, PriceSearch, oracle_copy, pilot_prices, stock_message, stock_message_payload
 from database import Base, SessionLocal, engine
-from models import PilotMessagePreference, PilotPack, PilotRefillAlert, PilotRefillEvent, PilotSession, PilotUsageEvent, PilotUser
+from models import PilotMessagePreference, PilotPack, PilotRefillAlert, PilotRefillEvent, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
 
 CAPACITY_ML = 1500
 DOSE_ML = 65
@@ -74,6 +74,7 @@ class UsageResult(PackStatus):
     refill_recorded: bool
     cashback_unlocked_cents: int
     oracle: OracleMessage
+    oracle_url: str | None = None
 
 
 def get_db():
@@ -223,8 +224,11 @@ def record_usage(
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
     language: str | None = Query(None, pattern="^(en|fr)$"),
+    defer_oracle: bool = Query(False),
 ):
-    return record_pack_event(db, user, tap.request_id, language, refill=False)
+    return record_pack_event(
+        db, user, tap.request_id, language, refill=False, defer_oracle=defer_oracle
+    )
 
 
 @router.post("/pack/refill", response_model=UsageResult)
@@ -254,7 +258,7 @@ def usage_message_context(db: Session, pack_id: int, before: PackStatus, now: da
     }
 
 
-def record_pack_event(db, user, request_id, language, *, refill):
+def record_pack_event(db, user, request_id, language, *, refill, defer_oracle=False):
     pack = get_pack(db, user, lock=True)
     if pack.started_at is None:
         raise HTTPException(409, "Start the pilot pack before logging events")
@@ -270,6 +274,7 @@ def record_pack_event(db, user, request_id, language, *, refill):
     result = before
     points_earned = 0
     usage_context = None
+    usage_event = None
     if duplicate is None:
         if refill:
             if before.current_volume_l == before.capacity_l:
@@ -286,11 +291,12 @@ def record_pack_event(db, user, request_id, language, *, refill):
             if before.current_volume_l == 0:
                 raise HTTPException(409, "The pilot pack is empty")
             usage_context = usage_message_context(db, pack.id, before, now)
-            db.add(PilotUsageEvent(
+            usage_event = PilotUsageEvent(
                 pack_id=pack.id, request_id=request_id,
                 volume_used_ml=min(DOSE_ML, round(before.current_volume_l * 1000)),
                 occurred_at=now,
-            ))
+            )
+            db.add(usage_event)
             points_earned = USAGE_POINTS
         db.flush()
         result = pack_status(db, pack, now, language)
@@ -302,17 +308,73 @@ def record_pack_event(db, user, request_id, language, *, refill):
                 None,
             )
 
-    db.commit()
     unlocked = result.cashback_earned_cents - before.cashback_earned_cents
-    oracle = stock_message(
-        result, language, points_earned=points_earned, cashback_unlocked_cents=unlocked,
-        event="refill" if refill else "usage", usage_context=usage_context,
-        generate=bool(points_earned),
-    )
+    oracle_url = None
+    if defer_oracle:
+        if usage_event is not None:
+            db.add(PilotUsageOracle(
+                usage_id=usage_event.id,
+                payload=stock_message_payload(
+                    result, language, points_earned=points_earned,
+                    cashback_unlocked_cents=unlocked, event="usage", usage_context=usage_context,
+                ),
+            ))
+            oracle_url = f"/pilot/pack/usage/{request_id}/oracle"
+        elif duplicate is not None and db.get(PilotUsageOracle, duplicate) is not None:
+            oracle_url = f"/pilot/pack/usage/{request_id}/oracle"
+
+    db.commit()
+    if defer_oracle:
+        oracle = OracleMessage(
+            stock_status=result.stock_status, message=None,
+            source="deferred" if oracle_url else "skipped",
+            refill_alert_message=result.refill_alert_message,
+        )
+    else:
+        oracle = stock_message(
+            result, language, points_earned=points_earned, cashback_unlocked_cents=unlocked,
+            event="refill" if refill else "usage", usage_context=usage_context,
+            generate=bool(points_earned),
+        )
     return UsageResult(
         **result.model_dump(exclude_computed_fields=True), points_earned=points_earned,
         refill_recorded=refill and duplicate is None,
-        cashback_unlocked_cents=unlocked, oracle=oracle,
+        cashback_unlocked_cents=unlocked, oracle=oracle, oracle_url=oracle_url,
+    )
+
+
+@router.post("/pack/usage/{request_id}/oracle", response_model=OracleMessage)
+def read_usage_oracle(
+    request_id: UUID,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    pack = get_pack(db, user)
+    saved = db.scalar(
+        select(PilotUsageOracle).join(PilotUsageEvent).where(
+            PilotUsageEvent.pack_id == pack.id,
+            PilotUsageEvent.request_id == str(request_id),
+        )
+    )
+    if saved is None:
+        raise HTTPException(404, "Usage message not found")
+
+    usage_id, payload, message = saved.usage_id, saved.payload, saved.message
+    db.rollback()
+    if message is None:
+        message, _ = oracle_copy(payload, None)
+        if message is not None:
+            db.execute(update(PilotUsageOracle).where(
+                PilotUsageOracle.usage_id == usage_id, PilotUsageOracle.message.is_(None)
+            ).values(message=message))
+            db.commit()
+            message = db.scalar(select(PilotUsageOracle.message).where(
+                PilotUsageOracle.usage_id == usage_id
+            ))
+    return OracleMessage(
+        stock_status=payload["stock_status"],
+        message=message,
+        source="kimi" if message else "unavailable",
     )
 
 

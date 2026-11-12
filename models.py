@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Float, String, DateTime, Text, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, Float, String, DateTime, Text, JSON, ForeignKey, UniqueConstraint
 from datetime import datetime
 
 from database import Base
@@ -97,3 +97,11 @@ class PilotRefillAlert(Base):
 
     pack_id = Column(ForeignKey("pilot_packs.id"), primary_key=True)
     cycle_started_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class PilotUsageOracle(Base):
+    __tablename__ = "pilot_usage_oracle"
+
+    usage_id = Column(ForeignKey("pilot_usage_events.id"), primary_key=True)
+    payload = Column(JSON, nullable=False)
+    message = Column(Text)
