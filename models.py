@@ -50,7 +50,8 @@ class PilotUsageEvent(Base):
     id = Column(Integer, primary_key=True)
     pack_id = Column(ForeignKey("pilot_packs.id"), nullable=False)
     request_id = Column(String(36), nullable=False)
-    grams_used = Column(Integer, nullable=False)
+    # Keep the existing SQL column so prior simulated pilot taps remain readable.
+    volume_used_ml = Column("grams_used", Integer, nullable=False)
     occurred_at = Column(DateTime(timezone=True), nullable=False)
 
 

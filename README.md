@@ -38,12 +38,13 @@ once. Deliver it privately and use HTTPS for all requests.
 
 | Endpoint | Behavior |
 | --- | --- |
-| `POST /pilot/pack/start` | Starts the participant's 1,500 g pack. Repeating the request retains the original start time. |
+| `POST /pilot/pack/start` | Starts the participant's 1.5 L pack. Repeating the request retains the original start time. |
 | `GET /pilot/pack` | Returns the current balance, full doses left and forecast. |
 | `POST /pilot/pack/usage` | Records one use. Send `{"request_id":"<UUID>"}` and reuse that UUID if retrying the same tap. |
 
 Send `Authorization: Bearer <token>` with each request. Each tap deducts
-65 g, capped at the remaining balance. The API uses all accepted taps for the
+65 mL, capped at the remaining balance. Pack responses use `current_volume_l`, `capacity_l`, `dose_ml`, and
+`consumption_rate_l_day`. The API uses all accepted taps for the
 pack and the actual elapsed time since activation, including time between
 taps. The forecast is available after two uses and 48 hours of history. It
 is recalculated when the client reads the pack. Once empty, the run-out
@@ -56,8 +57,9 @@ The pilot endpoints do not send notifications.
 
 An accepted usage tap earns 5 points. `POST /pilot/pack/refill` takes
 `{"request_id":"<UUID>"}` and restores an activated, partially used or empty
-pack to 1,500 g. A refill earns 10 points and starts a new forecast cycle.
-Prior events remain in the account history. Existing taps count at 5 points
+pack to 1.5 L. A refill earns 10 points and starts a new forecast cycle.
+Prior simulated events remain in the account history, with their stored counts
+interpreted as millilitres. Existing taps count at 5 points
 under the new rules. Retry the same event with its original request ID.
 Refill attempts on a full or unstarted pack return 409. A newly accepted refill
 returns `refill_recorded: true`. A usage or replay response returns false.

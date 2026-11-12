@@ -17,8 +17,8 @@ from pilot_oracle import OracleMessage, PriceSearch, pilot_prices, stock_message
 from database import Base, SessionLocal, engine
 from models import PilotMessagePreference, PilotPack, PilotRefillEvent, PilotSession, PilotUsageEvent, PilotUser
 
-STARTING_WEIGHT_G = 1500
-DOSE_G = 65
+CAPACITY_ML = 1500
+DOSE_ML = 65
 USAGE_POINTS = 5
 REFILL_POINTS = 10
 POINTS_PER_EURO = 50
@@ -34,14 +34,16 @@ class UsageTap(BaseModel):
 class PackStatus(BaseModel):
     started_at: datetime | None
     last_refill_at: datetime | None = None
-    current_weight_g: int
+    current_volume_l: float
+    capacity_l: float
+    dose_ml: int
     full_doses_remaining: int
     sample_count: int
     user_points: int
     cashback_earned_cents: int
     points_to_next_cashback: int
     data_span_days: float
-    consumption_rate_g_day: float | None = None
+    consumption_rate_l_day: float | None = None
     days_remaining: float | None = None
     estimated_runout_at: datetime | None = None
 
@@ -122,10 +124,10 @@ def pack_status(db: Session, pack: PilotPack, now: datetime) -> PackStatus:
         func.max(PilotRefillEvent.occurred_at).label("last_refill_at"),
     ).where(PilotRefillEvent.pack_id == pack.id).cte()
     current_cycle = PilotUsageEvent.id > func.coalesce(refills.c.last_refill_usage, 0)
-    count, grams_used, last_use, usage_count, refill_count, refill_at = db.execute(
+    count, volume_used_ml, last_use, usage_count, refill_count, refill_at = db.execute(
         select(
             func.count(PilotUsageEvent.id).filter(current_cycle),
-            func.coalesce(func.sum(PilotUsageEvent.grams_used).filter(current_cycle), 0),
+            func.coalesce(func.sum(PilotUsageEvent.volume_used_ml).filter(current_cycle), 0),
             func.max(PilotUsageEvent.occurred_at).filter(current_cycle),
             func.count(PilotUsageEvent.id),
             refills.c.refill_count,
@@ -134,7 +136,7 @@ def pack_status(db: Session, pack: PilotPack, now: datetime) -> PackStatus:
             PilotUsageEvent, PilotUsageEvent.pack_id == pack.id
         ).group_by(refills.c.refill_count, refills.c.last_refill_at)
     ).one()
-    remaining = STARTING_WEIGHT_G - grams_used
+    remaining = CAPACITY_ML - volume_used_ml
     points = usage_count * USAGE_POINTS + refill_count * REFILL_POINTS
     cycle_start = refill_at or pack.started_at
     started_at = _to_utc(cycle_start) if cycle_start is not None else None
@@ -142,8 +144,10 @@ def pack_status(db: Session, pack: PilotPack, now: datetime) -> PackStatus:
     result = PackStatus(
         started_at=started_at,
         last_refill_at=_to_utc(refill_at) if refill_at is not None else None,
-        current_weight_g=remaining,
-        full_doses_remaining=remaining // DOSE_G,
+        current_volume_l=remaining / 1000,
+        capacity_l=CAPACITY_ML / 1000,
+        dose_ml=DOSE_ML,
+        full_doses_remaining=remaining // DOSE_ML,
         sample_count=count,
         user_points=points,
         cashback_earned_cents=(points // POINTS_PER_EURO) * 100,
@@ -154,8 +158,8 @@ def pack_status(db: Session, pack: PilotPack, now: datetime) -> PackStatus:
         result.days_remaining = 0.0
         result.estimated_runout_at = _to_utc(last_use)
     if count >= 2 and elapsed_days >= 2.0:
-        rate = grams_used / elapsed_days
-        result.consumption_rate_g_day = rate
+        rate = volume_used_ml / elapsed_days
+        result.consumption_rate_l_day = rate / 1000
         if remaining > 0:
             result.days_remaining = remaining / rate
             result.estimated_runout_at = now + timedelta(days=result.days_remaining)
@@ -214,7 +218,7 @@ def record_pack_event(db, user, request_id, language, *, refill):
     points_earned = 0
     if duplicate is None:
         if refill:
-            if before.current_weight_g == STARTING_WEIGHT_G:
+            if before.current_volume_l == before.capacity_l:
                 raise HTTPException(409, "The pilot pack is already full")
             latest_usage_id = db.scalar(select(func.max(PilotUsageEvent.id)).where(
                 PilotUsageEvent.pack_id == pack.id
@@ -225,11 +229,12 @@ def record_pack_event(db, user, request_id, language, *, refill):
             ))
             points_earned = REFILL_POINTS
         else:
-            if before.current_weight_g == 0:
+            if before.current_volume_l == 0:
                 raise HTTPException(409, "The pilot pack is empty")
             db.add(PilotUsageEvent(
                 pack_id=pack.id, request_id=request_id,
-                grams_used=min(DOSE_G, before.current_weight_g), occurred_at=now,
+                volume_used_ml=min(DOSE_ML, round(before.current_volume_l * 1000)),
+                occurred_at=now,
             ))
             points_earned = USAGE_POINTS
         db.flush()

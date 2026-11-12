@@ -67,7 +67,7 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
             "For a stock update, use the supplied status and approximate days remaining if available. "
             "Write fresh wording each time. Vary the opening and sentence structure using the style provided. "
             "If points_earned is positive, state exactly how many points this event earned. "
-            "If event is refill, confirm the pack was refilled to 1,500 g. "
+            "For a refill, confirm the pack was refilled to the supplied capacity in litres. If you mention the remaining amount, use litres. If you mention the amount used per wash, use millilitres. "
             "If cashback_unlocked_cents is positive, state the newly unlocked cashback in euros "
             "(100 cents is €1). Say it was earned, never that it was paid or transferred. "
             "Otherwise, for an event earning points, mention points_to_next_cashback until the next €1. "

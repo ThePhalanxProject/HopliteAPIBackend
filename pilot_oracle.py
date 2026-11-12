@@ -73,7 +73,7 @@ def stock_message(
     days = pack.days_remaining
     if pack.started_at is None:
         state = "not_started"
-    elif pack.current_weight_g == 0:
+    elif pack.current_volume_l == 0:
         state = "empty"
     elif pack.full_doses_remaining == 0 or (days is not None and days <= 3):
         state = "urgent"
@@ -87,6 +87,9 @@ def stock_message(
             "task": "stock_update",
             "stock_status": state,
             "days_remaining": days,
+            "current_volume_l": pack.current_volume_l,
+            "capacity_l": pack.capacity_l,
+            "dose_ml": pack.dose_ml,
             "event": event,
             "points_earned": points_earned,
             "total_points": pack.user_points,
