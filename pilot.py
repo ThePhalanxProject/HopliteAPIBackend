@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, Field, computed_field
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -20,8 +20,12 @@ from models import PilotMessagePreference, PilotPack, PilotPriceSearch, PilotRef
 
 CAPACITY_ML = 1500
 DOSE_ML = 65
-BURST_REFILL_USES = 8
-BURST_WINDOW = timedelta(hours=1)
+FORECAST_WINDOWS = (
+    timedelta(hours=1), timedelta(days=1), timedelta(days=7),
+    timedelta(days=15), timedelta(days=30),
+)
+HOUR_WINDOW, DAY_WINDOW = FORECAST_WINDOWS[:2]
+COLD_START_BURST_USES = 8
 USAGE_POINTS = 5
 REFILL_POINTS = 10
 POINTS_PER_EURO = 50
@@ -53,6 +57,7 @@ class PackStatus(BaseModel):
     consumption_rate_l_day: float | None = None
     days_remaining: float | None = None
     estimated_runout_at: datetime | None = None
+    usage_overuse: dict = Field(default_factory=dict, exclude=True)
     refill_needed: bool = False
     refill_alert_message: str | None = None
 
@@ -142,6 +147,54 @@ def get_pack(db: Session, user: PilotUser, *, lock: bool = False) -> PilotPack:
     return pack
 
 
+def consumption_outlook(db: Session, pack: PilotPack, now: datetime, cycle_start: datetime):
+    tracked_since = _to_utc(pack.started_at)
+    timestamp = PilotUsageEvent.occurred_at
+    cutoffs = [now - window for window in FORECAST_WINDOWS]
+    baseline_end = cutoffs[1]
+    baseline_start = max(tracked_since, baseline_end - FORECAST_WINDOWS[-1])
+    *volumes, hourly_uses, daily_uses, baseline_uses = db.execute(
+        select(
+            *(func.coalesce(func.sum(PilotUsageEvent.volume_used_ml).filter(
+                timestamp > cutoff,
+                timestamp >= (cycle_start if index == 0 else tracked_since)
+            ), 0) for index, cutoff in enumerate(cutoffs)),
+            func.count().filter(timestamp > cutoffs[0], timestamp >= cycle_start),
+            func.count().filter(timestamp > cutoffs[1]),
+            func.count().filter(timestamp <= baseline_end),
+        ).where(
+            PilotUsageEvent.pack_id == pack.id, timestamp >= baseline_start, timestamp <= now,
+        )
+    ).one()
+
+    baseline_days = (baseline_end - baseline_start) / DAY_WINDOW
+    has_baseline = baseline_days >= 7 and baseline_uses >= 3
+    baseline_daily = baseline_uses / baseline_days if has_baseline else None
+    hourly_overuse = (
+        hourly_uses >= 3 and hourly_uses >= 2 * baseline_daily / 24
+        if has_baseline else hourly_uses >= COLD_START_BURST_USES
+    )
+    daily_overuse = has_baseline and daily_uses >= 4 and daily_uses >= 2 * baseline_daily
+    rates = [
+        volume / (window / DAY_WINDOW)
+        for window, volume in zip(FORECAST_WINDOWS[1:], volumes[1:])
+        if now - tracked_since >= window
+    ]
+    # A short burst should influence the forecast when there is evidence of overuse.
+    if hourly_overuse:
+        rates.append(volumes[0] / (HOUR_WINDOW / DAY_WINDOW))
+    return (
+        sum(rates) / len(rates) if rates else None,
+        {
+            "rapid_usage": hourly_overuse,
+            "uses_in_last_hour": hourly_uses,
+            "daily_overuse": daily_overuse,
+            "uses_in_last_day": daily_uses,
+            "historical_uses_per_day": round(baseline_daily, 2) if has_baseline else None,
+        },
+    )
+
+
 def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> PackStatus:
     refills = select(
         func.count(PilotRefillEvent.id).label("refill_count"),
@@ -149,8 +202,7 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> P
         func.max(PilotRefillEvent.occurred_at).label("last_refill_at"),
     ).where(PilotRefillEvent.pack_id == pack.id).cte()
     current_cycle = PilotUsageEvent.id > func.coalesce(refills.c.last_refill_usage, 0)
-    recent_cycle = current_cycle & PilotUsageEvent.occurred_at.between(now - BURST_WINDOW, now)
-    count, volume_used_ml, last_use, usage_count, refill_count, refill_at, recent_count, recent_ml = db.execute(
+    count, volume_used_ml, last_use, usage_count, refill_count, refill_at = db.execute(
         select(
             func.count(PilotUsageEvent.id).filter(current_cycle),
             func.coalesce(func.sum(PilotUsageEvent.volume_used_ml).filter(current_cycle), 0),
@@ -158,8 +210,6 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> P
             func.count(PilotUsageEvent.id),
             refills.c.refill_count,
             refills.c.last_refill_at,
-            func.count(PilotUsageEvent.id).filter(recent_cycle),
-            func.coalesce(func.sum(PilotUsageEvent.volume_used_ml).filter(recent_cycle), 0),
         ).select_from(refills).outerjoin(
             PilotUsageEvent, PilotUsageEvent.pack_id == pack.id
         ).group_by(refills.c.refill_count, refills.c.last_refill_at)
@@ -186,11 +236,8 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> P
         result.days_remaining = 0.0
         result.estimated_runout_at = _to_utc(last_use)
     rate = None
-    if recent_count >= BURST_REFILL_USES:
-        # Project the rolling-hour pace once there is enough evidence of a burst.
-        rate = recent_ml * (timedelta(days=1) / BURST_WINDOW)
-    elif count >= 2 and elapsed_days >= 2.0:
-        rate = volume_used_ml / elapsed_days
+    if started_at is not None and count:
+        rate, result.usage_overuse = consumption_outlook(db, pack, now, started_at)
     if rate:
         result.consumption_rate_l_day = rate / 1000
         if remaining > 0:
@@ -252,20 +299,13 @@ def record_refill(
     return record_pack_event(db, user, event.request_id, language, refill=True)
 
 
-def usage_message_context(db: Session, pack_id: int, before: PackStatus, now: datetime) -> dict:
-    hour_start = max(before.started_at, now - BURST_WINDOW)
-    last_use, recent_count = db.execute(
-        select(
-            func.max(PilotUsageEvent.occurred_at),
-            func.count(PilotUsageEvent.id).filter(PilotUsageEvent.occurred_at >= hour_start),
-        ).where(PilotUsageEvent.pack_id == pack_id)
-    ).one()
+def usage_message_context(db: Session, pack_id: int, now: datetime) -> dict:
+    last_use = db.scalar(select(func.max(PilotUsageEvent.occurred_at)).where(
+        PilotUsageEvent.pack_id == pack_id,
+    ))
     elapsed = now - _to_utc(last_use) if last_use is not None else None
-    days_away = elapsed.days if elapsed is not None and elapsed >= timedelta(days=7) else None
     return {
-        "days_since_previous_use": days_away,
-        "rapid_usage": recent_count + 1 >= 3,
-        "uses_in_last_hour": recent_count + 1,
+        "days_since_previous_use": elapsed.days if elapsed is not None and elapsed >= timedelta(days=7) else None,
     }
 
 
@@ -301,7 +341,7 @@ def record_pack_event(db, user, request_id, language, *, refill, defer_oracle=Fa
         else:
             if before.current_volume_l == 0:
                 raise HTTPException(409, "The pilot pack is empty")
-            usage_context = usage_message_context(db, pack.id, before, now)
+            usage_context = usage_message_context(db, pack.id, now)
             usage_event = PilotUsageEvent(
                 pack_id=pack.id, request_id=request_id,
                 volume_used_ml=min(DOSE_ML, round(before.current_volume_l * 1000)),
@@ -312,6 +352,7 @@ def record_pack_event(db, user, request_id, language, *, refill, defer_oracle=Fa
         db.flush()
         result = pack_status(db, pack, now, language)
         if usage_context is not None:
+            usage_context.update(result.usage_overuse)
             previous_pct = before.current_volume_l / before.capacity_l * 100
             remaining_pct = result.current_volume_l / result.capacity_l * 100
             usage_context["stock_milestone_percent"] = next(
