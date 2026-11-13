@@ -153,3 +153,11 @@ separate authenticated POST to `oracle_url` with no body and display its
 successfully generated message is reused if requested again. Keep the refill
 alert driven by the current pack response. Requests that omit `defer_oracle`
 continue to receive the Oracle message inline.
+
+### Fast refill taps
+
+Call `POST /pilot/pack/refill?defer_oracle=true` with the usual refill request
+UUID. Update the UI immediately from the returned stock, refill flag and points.
+Then make an authenticated POST to the returned `oracle_url` with no body and
+show its `message` beside Oracle when ready. If the message request fails,
+retry that URL. If the refill request itself must be retried, reuse its UUID.

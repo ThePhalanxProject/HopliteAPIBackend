@@ -16,7 +16,7 @@ from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, oracle_copy, pilot_prices, stock_message, stock_message_payload
 from pilot_price_progress import price_search_snapshot, run_price_search
 from database import Base, SessionLocal, engine
-from models import PilotMessagePreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
+from models import PilotMessagePreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotRefillOracle, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
 
 CAPACITY_ML = 1500
 DOSE_ML = 65
@@ -295,8 +295,11 @@ def record_refill(
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
     language: str | None = Query(None, pattern="^(en|fr)$"),
+    defer_oracle: bool = Query(False),
 ):
-    return record_pack_event(db, user, event.request_id, language, refill=True)
+    return record_pack_event(
+        db, user, event.request_id, language, refill=True, defer_oracle=defer_oracle,
+    )
 
 
 def usage_message_context(db: Session, pack_id: int, now: datetime) -> dict:
@@ -325,7 +328,7 @@ def record_pack_event(db, user, request_id, language, *, refill, defer_oracle=Fa
     result = before
     points_earned = 0
     usage_context = None
-    usage_event = None
+    pack_event = None
     if duplicate is None:
         if refill:
             if before.current_volume_l == before.capacity_l:
@@ -333,22 +336,22 @@ def record_pack_event(db, user, request_id, language, *, refill, defer_oracle=Fa
             latest_usage_id = db.scalar(select(func.max(PilotUsageEvent.id)).where(
                 PilotUsageEvent.pack_id == pack.id
             ))
-            db.add(PilotRefillEvent(
+            pack_event = PilotRefillEvent(
                 pack_id=pack.id, request_id=request_id, after_usage_id=latest_usage_id,
                 occurred_at=now,
-            ))
+            )
             points_earned = REFILL_POINTS
         else:
             if before.current_volume_l == 0:
                 raise HTTPException(409, "The pilot pack is empty")
             usage_context = usage_message_context(db, pack.id, now)
-            usage_event = PilotUsageEvent(
+            pack_event = PilotUsageEvent(
                 pack_id=pack.id, request_id=request_id,
                 volume_used_ml=min(DOSE_ML, round(before.current_volume_l * 1000)),
                 occurred_at=now,
             )
-            db.add(usage_event)
             points_earned = USAGE_POINTS
+        db.add(pack_event)
         db.flush()
         result = pack_status(db, pack, now, language)
         if usage_context is not None:
@@ -363,17 +366,20 @@ def record_pack_event(db, user, request_id, language, *, refill, defer_oracle=Fa
     unlocked = result.cashback_earned_cents - before.cashback_earned_cents
     oracle_url = None
     if defer_oracle:
-        if usage_event is not None:
-            db.add(PilotUsageOracle(
-                usage_id=usage_event.id,
+        oracle_model = PilotRefillOracle if refill else PilotUsageOracle
+        event_kind = "refill" if refill else "usage"
+        if pack_event is not None:
+            event_key = {"refill_id" if refill else "usage_id": pack_event.id}
+            db.add(oracle_model(
+                **event_key,
                 payload=stock_message_payload(
                     result, language, points_earned=points_earned,
-                    cashback_unlocked_cents=unlocked, event="usage", usage_context=usage_context,
+                    cashback_unlocked_cents=unlocked, event=event_kind, usage_context=usage_context,
                 ),
             ))
-            oracle_url = f"/pilot/pack/usage/{request_id}/oracle"
-        elif duplicate is not None and db.get(PilotUsageOracle, duplicate) is not None:
-            oracle_url = f"/pilot/pack/usage/{request_id}/oracle"
+            oracle_url = f"/pilot/pack/{event_kind}/{request_id}/oracle"
+        elif duplicate is not None and db.get(oracle_model, duplicate) is not None:
+            oracle_url = f"/pilot/pack/{event_kind}/{request_id}/oracle"
 
     db.commit()
     if defer_oracle:
@@ -401,27 +407,43 @@ def read_usage_oracle(
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
 ):
-    pack = get_pack(db, user)
-    saved = db.scalar(
-        select(PilotUsageOracle).join(PilotUsageEvent).where(
-            PilotUsageEvent.pack_id == pack.id,
-            PilotUsageEvent.request_id == str(request_id),
-        )
-    )
-    if saved is None:
-        raise HTTPException(404, "Usage message not found")
+    return read_event_oracle(request_id, user, db, refill=False)
 
-    usage_id, payload, message = saved.usage_id, saved.payload, saved.message
+
+@router.post("/pack/refill/{request_id}/oracle", response_model=OracleMessage)
+def read_refill_oracle(
+    request_id: UUID,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    return read_event_oracle(request_id, user, db, refill=True)
+
+
+def read_event_oracle(request_id: UUID, user: PilotUser, db: Session, *, refill: bool):
+    pack = get_pack(db, user)
+    event_model = PilotRefillEvent if refill else PilotUsageEvent
+    oracle_model = PilotRefillOracle if refill else PilotUsageOracle
+    event_id = oracle_model.refill_id if refill else oracle_model.usage_id
+    saved = db.execute(
+        select(event_id, oracle_model.payload, oracle_model.message).join(event_model).where(
+            event_model.pack_id == pack.id,
+            event_model.request_id == str(request_id),
+        )
+    ).one_or_none()
+    if saved is None:
+        raise HTTPException(404, "Refill message not found" if refill else "Usage message not found")
+
+    saved_id, payload, message = saved
     db.rollback()
     if message is None:
         message, _ = oracle_copy(payload, None)
         if message is not None:
-            db.execute(update(PilotUsageOracle).where(
-                PilotUsageOracle.usage_id == usage_id, PilotUsageOracle.message.is_(None)
+            db.execute(update(oracle_model).where(
+                event_id == saved_id, oracle_model.message.is_(None)
             ).values(message=message))
             db.commit()
-            message = db.scalar(select(PilotUsageOracle.message).where(
-                PilotUsageOracle.usage_id == usage_id
+            message = db.scalar(select(oracle_model.message).where(
+                event_id == saved_id
             ))
     return OracleMessage(
         stock_status=payload["stock_status"],

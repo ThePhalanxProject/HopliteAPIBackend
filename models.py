@@ -115,3 +115,11 @@ class PilotPriceSearch(Base):
     created_at = Column(DateTime(timezone=True), index=True, nullable=False)
     status = Column(String(20), nullable=False)
     result = Column(JSON, nullable=True)
+
+
+class PilotRefillOracle(Base):
+    __tablename__ = "pilot_refill_oracle"
+
+    refill_id = Column(ForeignKey("pilot_refill_events.id"), primary_key=True)
+    payload = Column(JSON, nullable=False)
+    message = Column(Text)
