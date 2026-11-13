@@ -286,13 +286,36 @@ def conflicts_with_location(row: dict, evidence: re.Pattern) -> bool:
     return False
 
 
+RETAIL_CHAINS = {
+    "be": ("Colruyt", "Delhaize", "Carrefour"),
+    "de": ("Edeka", "REWE", "Kaufland", "Lidl", "Aldi"),
+    "eg": ("Carrefour", "Spinneys", "Hyper One", "Kazyon"),
+    "es": ("Mercadona", "Carrefour", "Lidl", "Dia", "Alcampo"),
+    "fr": ("E.Leclerc", "Carrefour", "Intermarché", "Auchan", "Super U", "Lidl"),
+    "gb": ("Tesco", "Sainsbury's", "Asda", "Morrisons", "Waitrose"),
+    "it": ("Conad", "Coop", "Esselunga", "Lidl", "Eurospin"),
+    "za": ("Shoprite", "Checkers", "Pick n Pay", "Woolworths", "SPAR"),
+}
+
+
+def shopping_query(brand: str, language: str, country: str) -> str:
+    category = "lessive liquide machine lavages" if language == "fr" else "liquid laundry detergent washes"
+    query = f"{brand} {category}"
+    chains = RETAIL_CHAINS.get(country, ())
+    if chains:
+        # Retailer names guide discovery. Offer eligibility remains seller-neutral.
+        general_terms = ("supermarché", "achat en ligne") if language == "fr" else ("supermarket", "buy online")
+        retailer_terms = " OR ".join(f'"{name}"' for name in (*chains, *general_terms))
+        query = f"{query} ({retailer_terms})"
+    return query
+
+
 def pilot_prices(brand, language, location, country, *, refresh=False, postal_code=None):
     key = getenv("SERPAPI_API_KEY")
     if not key:
         raise HTTPException(503, "Shopping search is not configured")
-    category = "lessive liquide machine lavages" if language == "fr" else "liquid laundry detergent washes"
     rows = shopping_results(
-        f"{brand} {category}", location, country, language, key, refresh=refresh
+        shopping_query(brand, language, country), location, country, language, key, refresh=refresh
     )
     requested_brand = brand_words(brand)
     evidence = location_evidence(location, country, postal_code)
