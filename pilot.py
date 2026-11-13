@@ -16,7 +16,7 @@ from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, oracle_copy, pilot_prices, stock_message, stock_message_payload
 from pilot_price_progress import price_search_snapshot, run_price_search
 from database import Base, SessionLocal, engine
-from models import PilotMessagePreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotRefillOracle, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
+from models import PilotBurstRefillAlert, PilotMessagePreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotRefillOracle, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
 
 CAPACITY_ML = 1500
 DOSE_ML = 65
@@ -26,12 +26,18 @@ FORECAST_WINDOWS = (
 )
 HOUR_WINDOW, DAY_WINDOW = FORECAST_WINDOWS[:2]
 COLD_START_BURST_USES = 8
+REFILL_FORECAST_DAYS = 7
 USAGE_POINTS = 5
 REFILL_POINTS = 10
 POINTS_PER_EURO = 50
 REFILL_ALERT_MESSAGES = {
     "en": "Your detergent is running low. Please refill your Hoplite.",
     "fr": "Votre lessive est presque épuisée. Pensez à recharger votre Hoplite.",
+}
+
+BURST_REFILL_ALERT_MESSAGES = {
+    "en": "High usage brought forward your refill. Please refill your Hoplite.",
+    "fr": "Votre forte utilisation a avancé le besoin de recharge. Pensez à recharger votre Hoplite.",
 }
 
 router = APIRouter(prefix="/pilot", tags=["pilot"])
@@ -59,6 +65,7 @@ class PackStatus(BaseModel):
     estimated_runout_at: datetime | None = None
     usage_overuse: dict = Field(default_factory=dict, exclude=True)
     refill_needed: bool = False
+    refill_reason: Literal["high_utilization", "normal"] | None = None
     refill_alert_message: str | None = None
 
     @computed_field
@@ -72,7 +79,7 @@ class PackStatus(BaseModel):
             self.days_remaining is not None and self.days_remaining <= 3
         ):
             return "urgent"
-        if self.refill_needed or (self.days_remaining is not None and self.days_remaining <= 7):
+        if self.refill_needed or (self.days_remaining is not None and self.days_remaining <= REFILL_FORECAST_DAYS):
             return "low"
         return "ok"
 
@@ -180,11 +187,13 @@ def consumption_outlook(db: Session, pack: PilotPack, now: datetime, cycle_start
         for window, volume in zip(FORECAST_WINDOWS[1:], volumes[1:])
         if now - tracked_since >= window
     ]
+    regular_rate = sum(rates) / len(rates) if rates else None
     # A short burst should influence the forecast when there is evidence of overuse.
     if hourly_overuse:
         rates.append(volumes[0] / (HOUR_WINDOW / DAY_WINDOW))
     return (
         sum(rates) / len(rates) if rates else None,
+        regular_rate,
         {
             "rapid_usage": hourly_overuse,
             "uses_in_last_hour": hourly_uses,
@@ -235,9 +244,9 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> P
     if remaining == 0:
         result.days_remaining = 0.0
         result.estimated_runout_at = _to_utc(last_use)
-    rate = None
+    rate = regular_rate = None
     if started_at is not None and count:
-        rate, result.usage_overuse = consumption_outlook(db, pack, now, started_at)
+        rate, regular_rate, result.usage_overuse = consumption_outlook(db, pack, now, started_at)
     if rate:
         result.consumption_rate_l_day = rate / 1000
         if remaining > 0:
@@ -245,15 +254,31 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> P
             result.estimated_runout_at = now + timedelta(days=result.days_remaining)
     alert = db.get(PilotRefillAlert, pack.id)
     active = alert is not None and _to_utc(alert.cycle_started_at) == started_at
+    burst_alert = db.get(PilotBurstRefillAlert, pack.id) if active else None
     if not active and result.stock_status in {"low", "urgent", "empty"}:
         if alert is None:
             db.add(PilotRefillAlert(pack_id=pack.id, cycle_started_at=started_at))
         else:
             alert.cycle_started_at = started_at
+        if (
+            result.usage_overuse.get("rapid_usage")
+            and result.full_doses_remaining >= 3
+            and (not regular_rate or remaining / regular_rate > REFILL_FORECAST_DAYS)
+        ):
+            burst_alert = db.get(PilotBurstRefillAlert, pack.id)
+            if burst_alert is None:
+                burst_alert = PilotBurstRefillAlert(pack_id=pack.id, cycle_started_at=started_at)
+                db.add(burst_alert)
+            else:
+                burst_alert.cycle_started_at = started_at
         active = True
     if active:
         result.refill_needed = True
-        result.refill_alert_message = REFILL_ALERT_MESSAGES[language]
+        burst_triggered = burst_alert is not None and _to_utc(burst_alert.cycle_started_at) == started_at
+        result.refill_reason = "high_utilization" if burst_triggered else "normal"
+        result.refill_alert_message = (
+            BURST_REFILL_ALERT_MESSAGES[language] if burst_triggered else REFILL_ALERT_MESSAGES[language]
+        )
     return result
 
 

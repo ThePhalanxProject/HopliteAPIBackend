@@ -123,3 +123,10 @@ class PilotRefillOracle(Base):
     refill_id = Column(ForeignKey("pilot_refill_events.id"), primary_key=True)
     payload = Column(JSON, nullable=False)
     message = Column(Text)
+
+
+class PilotBurstRefillAlert(Base):
+    __tablename__ = "pilot_burst_refill_alerts"
+
+    pack_id = Column(ForeignKey("pilot_packs.id"), primary_key=True)
+    cycle_started_at = Column(DateTime(timezone=True), nullable=False)

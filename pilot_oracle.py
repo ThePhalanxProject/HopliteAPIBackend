@@ -78,6 +78,7 @@ def stock_message_payload(
     return {
         "task": "stock_update",
         "stock_status": pack.stock_status,
+        "refill_reason": pack.refill_reason,
         "days_remaining": pack.days_remaining,
         "current_volume_l": pack.current_volume_l,
         "capacity_l": pack.capacity_l,
