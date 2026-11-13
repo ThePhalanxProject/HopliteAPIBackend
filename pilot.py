@@ -20,6 +20,8 @@ from models import PilotMessagePreference, PilotPack, PilotPriceSearch, PilotRef
 
 CAPACITY_ML = 1500
 DOSE_ML = 65
+BURST_REFILL_USES = 8
+BURST_WINDOW = timedelta(hours=1)
 USAGE_POINTS = 5
 REFILL_POINTS = 10
 POINTS_PER_EURO = 50
@@ -147,7 +149,8 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> P
         func.max(PilotRefillEvent.occurred_at).label("last_refill_at"),
     ).where(PilotRefillEvent.pack_id == pack.id).cte()
     current_cycle = PilotUsageEvent.id > func.coalesce(refills.c.last_refill_usage, 0)
-    count, volume_used_ml, last_use, usage_count, refill_count, refill_at = db.execute(
+    recent_cycle = current_cycle & PilotUsageEvent.occurred_at.between(now - BURST_WINDOW, now)
+    count, volume_used_ml, last_use, usage_count, refill_count, refill_at, recent_count, recent_ml = db.execute(
         select(
             func.count(PilotUsageEvent.id).filter(current_cycle),
             func.coalesce(func.sum(PilotUsageEvent.volume_used_ml).filter(current_cycle), 0),
@@ -155,6 +158,8 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> P
             func.count(PilotUsageEvent.id),
             refills.c.refill_count,
             refills.c.last_refill_at,
+            func.count(PilotUsageEvent.id).filter(recent_cycle),
+            func.coalesce(func.sum(PilotUsageEvent.volume_used_ml).filter(recent_cycle), 0),
         ).select_from(refills).outerjoin(
             PilotUsageEvent, PilotUsageEvent.pack_id == pack.id
         ).group_by(refills.c.refill_count, refills.c.last_refill_at)
@@ -180,8 +185,13 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> P
     if remaining == 0:
         result.days_remaining = 0.0
         result.estimated_runout_at = _to_utc(last_use)
-    if count >= 2 and elapsed_days >= 2.0:
+    rate = None
+    if recent_count >= BURST_REFILL_USES:
+        # Project the rolling-hour pace once there is enough evidence of a burst.
+        rate = recent_ml * (timedelta(days=1) / BURST_WINDOW)
+    elif count >= 2 and elapsed_days >= 2.0:
         rate = volume_used_ml / elapsed_days
+    if rate:
         result.consumption_rate_l_day = rate / 1000
         if remaining > 0:
             result.days_remaining = remaining / rate
@@ -243,7 +253,7 @@ def record_refill(
 
 
 def usage_message_context(db: Session, pack_id: int, before: PackStatus, now: datetime) -> dict:
-    hour_start = max(before.started_at, now - timedelta(hours=1))
+    hour_start = max(before.started_at, now - BURST_WINDOW)
     last_use, recent_count = db.execute(
         select(
             func.max(PilotUsageEvent.occurred_at),
