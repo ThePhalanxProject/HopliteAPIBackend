@@ -46,7 +46,7 @@ def _parse_agent_json(candidate: Any) -> Dict[str, Any]:
     raise AgentError("Hostman agent returned non-JSON content")
 
 
-def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mode: bool = False) -> Optional[Dict[str, Any]]:
+def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mode: bool = False, *, pilot_mode: bool = False) -> Optional[Dict[str, Any]]:
     """Call the Hostman/Kimi agent if configured."""
     access_id = os.getenv("HOSTMAN_AGENT_ACCESS_ID")
     bearer_token = os.getenv("HOSTMAN_AGENT_BEARER_TOKEN")
@@ -60,6 +60,49 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
             "This is a connectivity test. Respond as the Hoplite Oracle. "
             "Your message MUST begin exactly with: 'Oracle is at your service.' "
             "After that, add one short sentence confirming that you received the test request."
+        )
+    elif pilot_mode:
+        instruction = (
+            "Write a brief consumer-facing update for the Hoplite pilot in at most 270 characters. "
+            "For a stock update, use the supplied status and approximate days remaining if available. "
+            "Write fresh wording each time. Vary the opening and sentence structure using the style provided. "
+            "For usage events, read usage_context before applying any style instructions. "
+            "If usage_context.possible_double_use is true, lead with a short, friendly question "
+            "about the two closely spaced logs. Ask whether the second dose was intentional and what "
+            "prompted it, then invite feedback on detergent quality, such as satisfaction with its "
+            "cleaning power or whether it removed stains as expected. Use your own wording and combine "
+            "the questions naturally when helpful. Do not assume a second dose was actually used, "
+            "that both logs were for the same wash, or that the detergent performed poorly. "
+            "These questions take priority over stock commentary and the hourly count. "
+            "Keep the questions in the requested language and leave room for the points earned. "
+            "Otherwise, when usage_context.rapid_usage is true, the first sentence MUST explicitly alert the user "
+            "that several uses were logged close together and state the exact usage_context.uses_in_last_hour "
+            "count as uses in the past hour. This alert takes priority over the supplied style, "
+            "welcome-back language, and stock milestones. Use fresh, neutral wording without guessing "
+            "why the taps occurred. Put rewards and any urgent stock information after the alert. "
+            "If usage_context.daily_overuse is true and both rapid_usage and possible_double_use are false, lead with the exact "
+            "number of washes logged in the past day and explain it is higher than the user's usual pace. "
+            "For usage events without overuse or possible double use, welcome the user back if days_since_previous_use is supplied, "
+            "call out stock_milestone_percent if supplied, and describe declining stock below half capacity. "
+            "Say the pack is empty if stock_status is empty. "
+            "When refill_reason is high_utilization, explicitly say that high usage brought forward "
+            "the refill and ask the user to refill. When it is normal, recommend a routine refill "
+            "as stock runs low. Follow this reason even if the current usage count has changed. "
+            "When a rapid-usage alert also applies, explain the refill after the usage alert. "
+            "Use only supplied facts, and do not guess why usage changed. "
+            "If points_earned is positive, state exactly how many points this event earned. "
+            "For a refill, confirm the pack was refilled to the supplied capacity in litres. If you mention the remaining amount, use litres. If you mention the amount used per wash, use millilitres. "
+            "If cashback_unlocked_cents is positive, state the newly unlocked cashback in euros "
+            "(100 cents is €1). Say it was earned, never that it was paid or transferred. "
+            "Otherwise, for an event earning points, mention points_to_next_cashback until the next €1. "
+            "Use supplied numbers exactly. Omit reward claims for a stock-only update. "
+            "For shopping only, format the message as a Markdown bullet list using '- '. "
+            "Use one bullet for the supplied offer. Within the bullet, bold the outlet name when present "
+            "and the numeric price per wash using double asterisks. Leave the currency symbol, per-wash "
+            "unit and all other wording unbolded. Put the Markdown inside the JSON message string. "
+            "For shopping, use only the supplied offer and its listed price per wash and currency. If the retailer name is absent, omit it. Never suggest other sellers, lead with the pack price, or imply local store "
+            "inventory, pickup availability, or that the price is guaranteed. "
+            "Use the requested language."
         )
     elif app_mode:
         instruction = (
@@ -98,17 +141,31 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
         f"{instruction}\n\nBACKEND_DATA:\n{json.dumps(payload, default=str)}"
     )
 
+    if pilot_mode:
+        prompt = (
+            "You are the Hoplite Oracle. Use only the supplied data. "
+            "Do not recalculate estimates or invent prices, dates, or availability. "
+            'Return only a JSON object with one key, "message". '
+            f"{instruction}\n\nBACKEND_DATA:\n{json.dumps(payload, default=str)}"
+        )
+
     try:
         response = requests.post(
             url,
             headers={"Authorization": f"Bearer {bearer_token}", "Content-Type": "application/json"},
             json={"message": prompt},
-            timeout=60,
+            timeout=(5, 60),
         )
         response.raise_for_status()
         data = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        raise AgentError(f"Hostman agent request failed: {exc}") from exc
+    except requests.Timeout as exc:
+        raise AgentError("Hostman agent request timed out") from exc
+    except requests.HTTPError as exc:
+        raise AgentError(f"Hostman agent returned HTTP {response.status_code}") from exc
+    except requests.RequestException as exc:
+        raise AgentError("Hostman agent request failed") from exc
+    except ValueError as exc:
+        raise AgentError("Hostman agent returned an invalid HTTP response body") from exc
 
     candidate = data.get("message", data.get("response", data)) if isinstance(data, dict) else data
     try:

@@ -11,6 +11,7 @@ from models import NotificationModel
 from consumption import calculate_consumption
 from agent import call_hoplite_agent, AgentError
 from pilot import router as pilot_router
+from pilot_auth import router as pilot_auth_router
 
 app = FastAPI()
 app.add_middleware(
@@ -23,6 +24,7 @@ app.add_middleware(
 
 Base.metadata.create_all(bind=engine)
 app.include_router(pilot_router)
+app.include_router(pilot_auth_router)
 
 
 @app.get("/health")
