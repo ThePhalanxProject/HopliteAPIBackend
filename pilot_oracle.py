@@ -287,6 +287,7 @@ def conflicts_with_location(row: dict, evidence: re.Pattern) -> bool:
 
 
 RETAIL_CHAINS = {
+    "ae": ("Carrefour", "LuLu Hypermarket", "Spinneys", "Union Coop", "Nesto Hypermarket"),
     "be": ("Colruyt", "Delhaize", "Carrefour"),
     "de": ("Edeka", "REWE", "Kaufland", "Lidl", "Aldi"),
     "eg": ("Carrefour", "Spinneys", "Hyper One", "Kazyon"),
@@ -294,6 +295,8 @@ RETAIL_CHAINS = {
     "fr": ("E.Leclerc", "Carrefour", "Intermarché", "Auchan", "Super U", "Lidl"),
     "gb": ("Tesco", "Sainsbury's", "Asda", "Morrisons", "Waitrose"),
     "it": ("Conad", "Coop", "Esselunga", "Lidl", "Eurospin"),
+    "sa": ("Panda", "Al Othaim Markets", "LuLu Hypermarket", "Danube", "BinDawood", "Tamimi Markets"),
+    "us": ("Walmart", "Kroger", "Albertsons", "Safeway", "Aldi"),
     "za": ("Shoprite", "Checkers", "Pick n Pay", "Woolworths", "SPAR"),
 }
 
