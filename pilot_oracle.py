@@ -313,7 +313,7 @@ def shopping_query(brand: str, language: str, country: str) -> str:
     return query
 
 
-def pilot_prices(brand, language, location, country, *, refresh=False, postal_code=None):
+def search_price_offers(brand, language, location, country, *, refresh=False, postal_code=None):
     key = getenv("SERPAPI_API_KEY")
     if not key:
         raise HTTPException(503, "Shopping search is not configured")
@@ -370,6 +370,13 @@ def pilot_prices(brand, language, location, country, *, refresh=False, postal_co
     for offer in offers:
         offer["price_per_wash"] = float(round(offer["price_per_wash"], 4))
     result = {"location": location, "reference_brand": brand, "reference_volume_l": 1.5, "offers": offers}
+    return result
+
+
+def summarize_price_offers(result, language, country):
+    brand = result["reference_brand"]
+    location = result["location"]
+    offers = result["offers"]
     if not offers:
         message = (
             f"Je n’ai trouvé aucune offre {brand} correspondant à votre recherche à {location} ({country.upper()})."
@@ -390,3 +397,10 @@ def pilot_prices(brand, language, location, country, *, refresh=False, postal_co
         None,
     )
     return {**result, "message": message, "message_source": source if message else "unavailable"}
+
+
+def pilot_prices(brand, language, location, country, *, refresh=False, postal_code=None):
+    result = search_price_offers(
+        brand, language, location, country, refresh=refresh, postal_code=postal_code,
+    )
+    return summarize_price_offers(result, language, country)

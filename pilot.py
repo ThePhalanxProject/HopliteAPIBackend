@@ -3,19 +3,20 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from secrets import token_urlsafe
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, computed_field
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, oracle_copy, pilot_prices, stock_message, stock_message_payload
+from pilot_price_progress import price_search_snapshot, run_price_search
 from database import Base, SessionLocal, engine
-from models import PilotMessagePreference, PilotPack, PilotRefillAlert, PilotRefillEvent, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
+from models import PilotMessagePreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
 
 CAPACITY_ML = 1500
 DOSE_ML = 65
@@ -394,15 +395,49 @@ def read_oracle(
 @router.post("/prices")
 def search_prices(
     query: PriceSearch,
+    tasks: BackgroundTasks,
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
+    progressive: bool = False,
 ):
-    language = query.language or message_language(db, user.id)
+    user_id = user.id
+    language = query.language or message_language(db, user_id)
+    if progressive:
+        now = datetime.now(timezone.utc)
+        db.execute(delete(PilotPriceSearch).where(
+            PilotPriceSearch.created_at < now - timedelta(hours=1)
+        ))
+        search = PilotPriceSearch(
+            id=str(uuid4()), user_id=user_id, created_at=now, status="searching",
+        )
+        snapshot = price_search_snapshot(search, now)
+        db.add(search)
+        db.commit()
+        tasks.add_task(run_price_search, snapshot["search_id"], query, language)
+        return snapshot
+
     db.rollback()
     return pilot_prices(
         query.brand, language, query.city, query.country,
         refresh=query.refresh, postal_code=query.postal_code,
     )
+
+
+@router.get("/prices/{search_id}")
+def read_price_search(
+    search_id: UUID,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    search = db.scalar(select(PilotPriceSearch).where(
+        PilotPriceSearch.id == str(search_id),
+        PilotPriceSearch.user_id == user.id,
+        PilotPriceSearch.created_at >= now - timedelta(hours=1),
+    ))
+    if search is None:
+        raise HTTPException(404, "Price search not found")
+    return price_search_snapshot(search, now)
 
 
 def provision_participant(db: Session, participant_code: str) -> str:

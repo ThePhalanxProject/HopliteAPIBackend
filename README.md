@@ -128,6 +128,21 @@ The **Refresh prices** button calls the same authenticated `POST /pilot/prices`
 endpoint with `"refresh": true` alongside brand, city, and country. This bypasses
 SerpApi's cache for the search. Automatic searches can omit the field.
 
+### Progressive price results in Primio
+
+Add `?progressive=true` to the authenticated `POST /pilot/prices` request.
+The response returns `search_id` and `status_url` immediately. Send the same
+bearer token with a GET to `status_url` at approximately 5 and 15 seconds.
+After the second check, poll every 2 seconds until `stage` is `final`. A check
+can return `final` early if the search and summary have already finished.
+
+At each check, display any returned `offers`. While `status` is `searching`,
+show that prices are being checked. While it is `summarizing`, keep the offers
+visible and show that Oracle is preparing the summary. On `complete`, display
+`message` beside Oracle when available. Keep the offers if the message is
+unavailable. On `failed`, show a retry action. Each GET reads the same search
+and makes no external requests. Snapshots are available for one hour.
+
 ### Fast usage taps
 
 For immediate stock and points, call `POST /pilot/pack/usage?defer_oracle=true`

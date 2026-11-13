@@ -105,3 +105,13 @@ class PilotUsageOracle(Base):
     usage_id = Column(ForeignKey("pilot_usage_events.id"), primary_key=True)
     payload = Column(JSON, nullable=False)
     message = Column(Text)
+
+
+class PilotPriceSearch(Base):
+    __tablename__ = "pilot_price_searches"
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(ForeignKey("pilot_users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), index=True, nullable=False)
+    status = Column(String(20), nullable=False)
+    result = Column(JSON, nullable=True)
