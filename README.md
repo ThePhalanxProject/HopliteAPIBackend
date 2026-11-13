@@ -80,9 +80,9 @@ The authenticated `POST /pilot/prices` endpoint takes the brand and shopping
 location from Primio, for example
 `{"brand":"Ariel","city":"Amiens, France","country":"fr"}`.
 Country is a two-letter country code. The participant's saved message language
-applies unless the request includes an explicit language. A 1.5 L liquid laundry
-pack is the reference. Only offers matching the selected brand can rank, and
-different pack sizes qualify when the title states a wash count. Ranking uses
+applies unless the request includes an explicit language. The search covers any
+pack size of the selected liquid laundry detergent brand. Eligible offers must
+state a wash count in the title. Ranking uses
 listed item price per wash, excluding delivery. Mixed currencies are not compared.
 
 Set `SERPAPI_API_KEY` for shopping. Primio asks the participant to enter a city
@@ -126,7 +126,7 @@ An empty offer list is a successful search with no eligible offers.
 
 The **Refresh prices** button calls the same authenticated `POST /pilot/prices`
 endpoint with `"refresh": true` alongside brand, city, and country. This bypasses
-SerpApi's cache for both searches. Automatic searches can omit the field.
+SerpApi's cache for the search. Automatic searches can omit the field.
 
 ### Fast usage taps
 

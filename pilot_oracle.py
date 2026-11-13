@@ -291,11 +291,7 @@ def pilot_prices(brand, language, location, country, *, refresh=False, postal_co
     if not key:
         raise HTTPException(503, "Shopping search is not configured")
     category = "lessive liquide machine lavages" if language == "fr" else "liquid laundry detergent washes"
-    reference = "1,5 L" if language == "fr" else "1.5 L"
     rows = shopping_results(
-        f"{brand} {category} {reference}", location, country, language, key, refresh=refresh
-    )
-    alternatives = shopping_results(
         f"{brand} {category}", location, country, language, key, refresh=refresh
     )
     requested_brand = brand_words(brand)
@@ -303,7 +299,7 @@ def pilot_prices(brand, language, location, country, *, refresh=False, postal_co
 
     offers = []
     seen_links = set()
-    for row in rows + alternatives:
+    for row in rows:
         if not isinstance(row, dict) or row.get("second_hand_condition"):
             continue
         amount = row.get("extracted_price")
