@@ -9,8 +9,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from consumption import _to_utc
-from models import PilotLogin, PilotSession, PilotUser
-from pilot import bearer, get_db, token_digest
+from models import (
+    PilotBurstRefillAlert, PilotLogin, PilotPriceSearch, PilotRefillAlert,
+    PilotRefillEvent, PilotRefillOracle, PilotSession, PilotUsageEvent,
+    PilotUsageOracle, PilotUser,
+)
+from pilot import PackStatus, bearer, get_db, get_pack, message_language, pack_status, participant, token_digest
 
 router = APIRouter(prefix="/pilot/auth", tags=["pilot"])
 
@@ -71,6 +75,21 @@ def enroll(data: EnrollmentRequest, db: Session = Depends(get_db)):
     return result
 
 
+def verify_password(db, account, password, now, *, error_status, error_message):
+    if account.locked_until and _to_utc(account.locked_until) > now:
+        raise HTTPException(429, "Too many attempts. Try again later.")
+    salt, digest = account.password_hash.split(":", 1)
+    if not compare_digest(password_digest(password, bytes.fromhex(salt)), digest):
+        account.failed_attempts += 1
+        if account.failed_attempts >= 5:
+            account.locked_until = now + timedelta(minutes=15)
+            account.failed_attempts = 0
+        db.commit()
+        raise HTTPException(error_status, error_message)
+    account.failed_attempts = 0
+    account.locked_until = None
+
+
 @router.post("/login", response_model=LoginResult)
 def login(data: LoginRequest, db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
@@ -78,18 +97,7 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
     if account is None:
         password_digest(data.password, b"\0" * 16)
         raise HTTPException(401, "Invalid email or password")
-    if account.locked_until and _to_utc(account.locked_until) > now:
-        raise HTTPException(429, "Too many attempts. Try again later.")
-    salt, digest = account.password_hash.split(":", 1)
-    if not compare_digest(password_digest(data.password, bytes.fromhex(salt)), digest):
-        account.failed_attempts += 1
-        if account.failed_attempts >= 5:
-            account.locked_until = now + timedelta(minutes=15)
-            account.failed_attempts = 0
-        db.commit()
-        raise HTTPException(401, "Invalid email or password")
-    account.failed_attempts = 0
-    account.locked_until = None
+    verify_password(db, account, data.password, now, error_status=401, error_message="Invalid email or password")
     db.execute(delete(PilotSession).where(
         PilotSession.user_id == account.user_id, PilotSession.expires_at <= now
     ))
@@ -105,3 +113,36 @@ def logout(credentials=Depends(bearer), db: Session = Depends(get_db)):
             PilotSession.token_hash == token_digest(credentials.credentials)
         ))
         db.commit()
+
+
+class ResetAccountRequest(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+
+
+@router.post("/reset", response_model=PackStatus)
+def reset_account(
+    data: ResetAccountRequest,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    account = db.scalar(select(PilotLogin).where(
+        PilotLogin.user_id == user.id,
+    ).with_for_update())
+    if account is None:
+        raise HTTPException(403, "Enroll your pilot login before resetting activity")
+    verify_password(db, account, data.password, now, error_status=403, error_message="Incorrect password")
+
+    pack = get_pack(db, user, lock=True)
+    usage_ids = select(PilotUsageEvent.id).where(PilotUsageEvent.pack_id == pack.id)
+    refill_ids = select(PilotRefillEvent.id).where(PilotRefillEvent.pack_id == pack.id)
+    db.execute(delete(PilotUsageOracle).where(PilotUsageOracle.usage_id.in_(usage_ids)))
+    db.execute(delete(PilotRefillOracle).where(PilotRefillOracle.refill_id.in_(refill_ids)))
+    for model in (PilotBurstRefillAlert, PilotRefillAlert, PilotRefillEvent, PilotUsageEvent):
+        db.execute(delete(model).where(model.pack_id == pack.id))
+    db.execute(delete(PilotPriceSearch).where(PilotPriceSearch.user_id == user.id))
+    pack.started_at = None
+    db.flush()
+    result = pack_status(db, pack, now, message_language(db, user.id))
+    db.commit()
+    return result
