@@ -26,6 +26,7 @@ FORECAST_WINDOWS = (
 )
 HOUR_WINDOW, DAY_WINDOW = FORECAST_WINDOWS[:2]
 COLD_START_BURST_USES = 8
+POSSIBLE_DOUBLE_USE_GAP = timedelta(seconds=30)
 REFILL_FORECAST_DAYS = 7
 USAGE_POINTS = 5
 REFILL_POINTS = 10
@@ -333,6 +334,7 @@ def usage_message_context(db: Session, pack_id: int, now: datetime) -> dict:
     ))
     elapsed = now - _to_utc(last_use) if last_use is not None else None
     return {
+        "possible_double_use": elapsed is not None and timedelta(0) <= elapsed < POSSIBLE_DOUBLE_USE_GAP,
         "days_since_previous_use": elapsed.days if elapsed is not None and elapsed >= timedelta(days=7) else None,
     }
 
