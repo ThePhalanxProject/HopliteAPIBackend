@@ -328,7 +328,7 @@ def shopping_query(brand: str, language: str, country: str) -> str:
     return query
 
 
-def search_price_offers(brand, language, location, country, *, refresh=False, postal_code=None):
+def search_price_offers(brand, language, location, country, *, refresh=False, postal_code=None, preferences=None):
     key = getenv("SERPAPI_API_KEY")
     if not key:
         raise HTTPException(503, "Shopping search is not configured")
@@ -380,11 +380,18 @@ def search_price_offers(brand, language, location, country, *, refresh=False, po
     currency = max((o["currency"] for o in offers), key=lambda c: sum(o["currency"] == c for o in offers), default=None)
     offers = sorted(
         (o for o in offers if o["currency"] == currency),
-        key=lambda offer: (not major_retailer(offer["retailer"], country), offer["price_per_wash"]),
+        key=lambda offer: (
+            not major_retailer(offer["retailer"], country),
+            offer["price_per_wash"] / (1 + Decimal(str(min(
+                (preferences or {}).get(" ".join(brand_words(offer["retailer"] or "")), 0) * 0.05, 0.15
+            )))),
+            offer["price_per_wash"],
+        ),
     )[:5]
     for offer in offers:
         offer["price_per_wash"] = float(round(offer["price_per_wash"], 4))
-    result = {"location": location, "reference_brand": brand, "reference_volume_l": 1.5, "offers": offers}
+        offer["preference_score"] = (preferences or {}).get(" ".join(brand_words(offer["retailer"] or "")), 0)
+    result = {"location": location, "reference_brand": brand, "reference_volume_l": 1.5, "country": country, "offers": offers}
     return result
 
 
@@ -404,7 +411,7 @@ def summarize_price_offers(result, language, country):
         {
             "task": "shopping_update",
             "offers": offers,
-            "ranking_basis": "major retail chains first; then other sellers; price per wash ascending within each group; exclude delivery",
+            "ranking_basis": "major retail chains first; then other sellers; price per wash adjusted by observed retailer preferences (up to 15 percent) within each group; exclude delivery",
             "reference_brand": brand,
             "language": language,
         },
@@ -413,8 +420,8 @@ def summarize_price_offers(result, language, country):
     return {**result, "message": message, "message_source": source if message else "unavailable"}
 
 
-def pilot_prices(brand, language, location, country, *, refresh=False, postal_code=None):
+def pilot_prices(brand, language, location, country, *, refresh=False, postal_code=None, preferences=None):
     result = search_price_offers(
-        brand, language, location, country, refresh=refresh, postal_code=postal_code,
+        brand, language, location, country, refresh=refresh, postal_code=postal_code, preferences=preferences,
     )
     return summarize_price_offers(result, language, country)

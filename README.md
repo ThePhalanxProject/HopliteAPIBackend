@@ -161,3 +161,30 @@ UUID. Update the UI immediately from the returned stock, refill flag and points.
 Then make an authenticated POST to the returned `oracle_url` with no body and
 show its `message` beside Oracle when ready. If the message request fails,
 retry that URL. If the refill request itself must be retried, reuse its UUID.
+
+
+### Learning offer preferences in Primio
+
+After opening an offer link, send authenticated `POST /pilot/prices/preferences`:
+
+```json
+{
+  "request_id": "<new UUID for this interaction>",
+  "search_id": "<search_id returned by the price request>",
+  "offer_url": "<exact url from the selected offer>",
+  "action": "click"
+}
+```
+
+Use `"select"` when the user explicitly chooses an offer. Reuse request_id on
+retries. A successful request returns 204. Link navigation should proceed even
+if preference recording fails. Only offers from the signed-in user's saved
+search are accepted. For Markdown links, match the tapped URL to offers[].url.
+
+Preferences are scoped to the participant, brand and country. A click adds one
+signal, a selection two; clicking and selecting the same offer in one search
+counts as two total. Each signal gives a 5% ranking advantage, capped at 15%.
+Major retailers remain first. Listed prices remain the actual prices. Saved
+preferences persist when old search snapshots expire and are cleared by the
+password-protected account reset. Both synchronous and progressive searches
+apply the scores and include preference_score in each returned offer.

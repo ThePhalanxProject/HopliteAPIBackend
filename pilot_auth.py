@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from consumption import _to_utc
 from models import (
-    PilotBurstRefillAlert, PilotLogin, PilotPriceSearch, PilotRefillAlert,
+    PilotBurstRefillAlert, PilotLogin, PilotOfferPreference, PilotPriceSearch, PilotRefillAlert,
     PilotRefillEvent, PilotRefillOracle, PilotSession, PilotUsageEvent,
     PilotUsageOracle, PilotUser,
 )
@@ -140,6 +140,7 @@ def reset_account(
     db.execute(delete(PilotRefillOracle).where(PilotRefillOracle.refill_id.in_(refill_ids)))
     for model in (PilotBurstRefillAlert, PilotRefillAlert, PilotRefillEvent, PilotUsageEvent):
         db.execute(delete(model).where(model.pack_id == pack.id))
+    db.execute(delete(PilotOfferPreference).where(PilotOfferPreference.user_id == user.id))
     db.execute(delete(PilotPriceSearch).where(PilotPriceSearch.user_id == user.id))
     pack.started_at = None
     db.flush()

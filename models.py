@@ -130,3 +130,19 @@ class PilotBurstRefillAlert(Base):
 
     pack_id = Column(ForeignKey("pilot_packs.id"), primary_key=True)
     cycle_started_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class PilotOfferPreference(Base):
+    __tablename__ = "pilot_offer_preferences"
+    __table_args__ = (UniqueConstraint("user_id", "request_id"),)
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(ForeignKey("pilot_users.id"), nullable=False, index=True)
+    request_id = Column(String(36), nullable=False)
+    search_id = Column(String(36), nullable=False)
+    url = Column(Text, nullable=False)
+    retailer = Column(String, nullable=False)
+    brand = Column(String, nullable=False)
+    country = Column(String(2), nullable=False)
+    action = Column(String(10), nullable=False)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)

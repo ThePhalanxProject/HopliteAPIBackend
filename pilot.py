@@ -13,10 +13,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from consumption import _to_utc
-from pilot_oracle import OracleMessage, PriceSearch, oracle_copy, pilot_prices, stock_message, stock_message_payload
+from pilot_oracle import OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
+from pilot_preferences import preference_scores
 from pilot_price_progress import price_search_snapshot, run_price_search
 from database import Base, SessionLocal, engine
-from models import PilotBurstRefillAlert, PilotMessagePreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotRefillOracle, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
+from models import PilotBurstRefillAlert, PilotMessagePreference, PilotOfferPreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotRefillOracle, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
 
 CAPACITY_ML = 1500
 DOSE_ML = 65
@@ -124,7 +125,7 @@ class MessagePreference(BaseModel):
 
 
 def message_language(db: Session, user_id: int) -> str:
-    preference = db.get(PilotMessagePreference, user_id)
+    preference = db.get(PilotMessagePreference, PilotOfferPreference, user_id)
     return preference.language if preference else "en"
 
 
@@ -516,11 +517,19 @@ def search_prices(
         tasks.add_task(run_price_search, snapshot["search_id"], query, language)
         return snapshot
 
+    scores = preference_scores(db, user_id, query.brand, query.country)
     db.rollback()
-    return pilot_prices(
+    result = pilot_prices(
         query.brand, language, query.city, query.country,
-        refresh=query.refresh, postal_code=query.postal_code,
+        refresh=query.refresh, postal_code=query.postal_code, preferences=scores,
     )
+    search = PilotPriceSearch(
+        id=str(uuid4()), user_id=user_id, created_at=datetime.now(timezone.utc),
+        status="complete", result=result,
+    )
+    db.add(search)
+    db.commit()
+    return {**result, "search_id": search.id, "status_url": f"/pilot/prices/{search.id}"}
 
 
 @router.get("/prices/{search_id}")
@@ -538,6 +547,54 @@ def read_price_search(
     if search is None:
         raise HTTPException(404, "Price search not found")
     return price_search_snapshot(search, now)
+
+
+class OfferInteraction(BaseModel):
+    request_id: UUID
+    search_id: UUID
+    offer_url: str = Field(max_length=8192)
+    action: Literal["click", "select"]
+
+
+@router.post("/prices/preferences", status_code=204)
+def record_offer_preference(
+    event: OfferInteraction,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    get_pack(db, user, lock=True)
+    existing = db.scalar(select(PilotOfferPreference).where(
+        PilotOfferPreference.user_id == user.id,
+        PilotOfferPreference.request_id == str(event.request_id),
+    ))
+    if existing is not None:
+        if (existing.search_id, existing.url, existing.action) != (
+            str(event.search_id), event.offer_url, event.action,
+        ):
+            raise HTTPException(409, "Request ID already used for another interaction")
+        return
+    search = db.scalar(select(PilotPriceSearch).where(
+        PilotPriceSearch.id == str(event.search_id), PilotPriceSearch.user_id == user.id,
+    ))
+    if search is None or not search.result:
+        raise HTTPException(404, "Price search not found")
+    offer = next((offer for offer in search.result.get("offers", [])
+                  if offer["url"] == event.offer_url), None)
+    if offer is None:
+        raise HTTPException(404, "Offer not found in this search")
+    retailer = " ".join(brand_words(offer.get("retailer") or ""))
+    if not retailer:
+        raise HTTPException(422, "This offer has no identified retailer")
+    country = search.result.get("country")
+    if not country:
+        raise HTTPException(409, "Refresh prices before recording this preference")
+    db.add(PilotOfferPreference(
+        user_id=user.id, request_id=str(event.request_id), search_id=search.id,
+        url=event.offer_url, retailer=retailer,
+        brand=" ".join(brand_words(search.result["reference_brand"])),
+        country=country, action=event.action, occurred_at=datetime.now(timezone.utc),
+    ))
+    db.commit()
 
 
 def provision_participant(db: Session, participant_code: str) -> str:

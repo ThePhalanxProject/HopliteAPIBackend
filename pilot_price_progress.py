@@ -8,6 +8,7 @@ from sqlalchemy import update
 from consumption import _to_utc
 from database import SessionLocal
 from models import PilotPriceSearch
+from pilot_preferences import preference_scores
 from pilot_oracle import PriceSearch, search_price_offers, summarize_price_offers
 
 logger = logging.getLogger(__name__)
@@ -54,10 +55,15 @@ def save_progress(search_id: str, status: str, result: dict | None = None) -> No
 
 
 def run_price_search(search_id: str, query: PriceSearch, language: str) -> None:
+    with SessionLocal() as db:
+        search = db.get(PilotPriceSearch, search_id)
+        if search is None:
+            return
+        scores = preference_scores(db, search.user_id, query.brand, query.country)
     try:
         result = search_price_offers(
             query.brand, language, query.city, query.country,
-            refresh=query.refresh, postal_code=query.postal_code,
+            refresh=query.refresh, postal_code=query.postal_code, preferences=scores,
         )
     except Exception as exc:
         logger.warning("Pilot price search %s failed (%s)", search_id, type(exc).__name__)
