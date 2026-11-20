@@ -410,8 +410,19 @@ def summarize_price_offers(result, language, country):
     message, source = oracle_copy(
         {
             "task": "shopping_update",
-            "offers": offers,
-            "ranking_basis": "major retail chains first; then other sellers; price per wash adjusted by observed retailer preferences (up to 15 percent) within each group; exclude delivery",
+            "offers": [
+                {
+                    "product_title": " ".join(offer["title"].split()),
+                    "pack_price": offer["listed_price"],
+                    "price_per_use": offer["price_per_wash"],
+                    "currency": offer["currency"],
+                    "outlet": offer["retailer"],
+                    "url": offer["url"],
+                }
+                for offer in offers
+            ],
+            "country": country,
+            "city": location,
             "reference_brand": brand,
             "language": language,
         },
