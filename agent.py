@@ -63,7 +63,7 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
         )
     elif pilot_mode:
         instruction = (
-            "Write a brief consumer-facing update for the Hoplite pilot in at most 270 characters. "
+            "Write a brief consumer-facing update for the Hoplite pilot in at most 270 characters for stock messages. For shopping, allow up to 12000 characters including links. "
             "For a stock update, use the supplied status and approximate days remaining if available. "
             "Write fresh wording each time. Vary the opening and sentence structure using the style provided. "
             "For usage events, read usage_context before applying any style instructions. "
@@ -97,10 +97,10 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
             "Otherwise, for an event earning points, mention points_to_next_cashback until the next €1. "
             "Use supplied numbers exactly. Omit reward claims for a stock-only update. "
             "For shopping only, format the message as a Markdown bullet list using '- '. "
-            "Use one bullet for the supplied offer. Within the bullet, bold the outlet name when present "
+            "Use one bullet for each supplied offer, in the exact supplied order, with major retail chains first. Within each bullet, bold the outlet name when present "
             "and the numeric price per wash using double asterisks. Leave the currency symbol, per-wash "
-            "unit and all other wording unbolded. Put the Markdown inside the JSON message string. "
-            "For shopping, use only the supplied offer and its listed price per wash and currency. If the retailer name is absent, omit it. Never suggest other sellers, lead with the pack price, or imply local store "
+            "unit and all other wording unbolded. Make the bold outlet name clickable with Markdown [**Outlet**](<url>), using the exact supplied URL for that offer. If no outlet name is supplied, use a localized clickable Buy link. Never invent or alter links. Put the Markdown inside the JSON message string. "
+            "For shopping, use only the supplied offers and their listed prices per wash and currencies. If the retailer name is absent, omit it. Never suggest other sellers, lead with the pack price, or imply local store "
             "inventory, pickup availability, or that the price is guaranteed. "
             "Use the requested language."
         )

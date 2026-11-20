@@ -65,7 +65,7 @@ def oracle_copy(payload, fallback, *, generate=True):
             return fallback, "fallback"
         if response:
             message = response.get("message")
-            if isinstance(message, str) and 0 < len(message.strip()) <= 300:
+            if isinstance(message, str) and 0 < len(message.strip()) <= (12000 if payload.get("task") == "shopping_update" else 300):
                 return message.strip(), "kimi"
         logger.warning("Pilot Oracle response had no usable message")
     return fallback, "fallback"
@@ -198,7 +198,12 @@ def consumer_offer(row):
     if BUSINESS_ONLY.search(metadata):
         return None
 
-    for link in (row.get("link"), row.get("product_link")):
+    links = [row.get("link"), row.get("product_link")]
+    # Prefer a retailer URL over a Google product page when either is supplied.
+    links.sort(key=lambda link: bool(
+        isinstance(link, str) and re.match(r"https://(?:[^/]+\.)?google\.[^/]+/", link)
+    ))
+    for link in links:
         if not isinstance(link, str):
             continue
         try:
@@ -302,6 +307,15 @@ RETAIL_CHAINS = {
 }
 
 
+def major_retailer(retailer: str | None, country: str) -> bool:
+    seller = " ".join(brand_words(retailer or ""))
+    for chain in RETAIL_CHAINS.get(country, ()):
+        name = " ".join(brand_words(chain))
+        if seller == name or seller.startswith(name + " "):
+            return True
+    return False
+
+
 def shopping_query(brand: str, language: str, country: str) -> str:
     category = "lessive liquide machine lavages" if language == "fr" else "liquid laundry detergent washes"
     query = f"{brand} {category}"
@@ -366,7 +380,7 @@ def search_price_offers(brand, language, location, country, *, refresh=False, po
     currency = max((o["currency"] for o in offers), key=lambda c: sum(o["currency"] == c for o in offers), default=None)
     offers = sorted(
         (o for o in offers if o["currency"] == currency),
-        key=lambda offer: offer["price_per_wash"],
+        key=lambda offer: (not major_retailer(offer["retailer"], country), offer["price_per_wash"]),
     )[:5]
     for offer in offers:
         offer["price_per_wash"] = float(round(offer["price_per_wash"], 4))
@@ -386,12 +400,11 @@ def summarize_price_offers(result, language, country):
         )
         return {**result, "message": message, "message_source": "fallback"}
 
-    best = offers[0]
     message, source = oracle_copy(
         {
             "task": "shopping_update",
-            "offer": best,
-            "ranking_basis": "listed item price per wash; exclude delivery",
+            "offers": offers,
+            "ranking_basis": "major retail chains first; then other sellers; price per wash ascending within each group; exclude delivery",
             "reference_brand": brand,
             "language": language,
         },
