@@ -125,7 +125,7 @@ class MessagePreference(BaseModel):
 
 
 def message_language(db: Session, user_id: int) -> str:
-    preference = db.get(PilotMessagePreference, PilotOfferPreference, user_id)
+    preference = db.get(PilotMessagePreference, user_id)
     return preference.language if preference else "en"
 
 
