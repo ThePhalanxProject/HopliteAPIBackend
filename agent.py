@@ -131,6 +131,8 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
             "Use only supplied facts, and do not guess why usage changed. "
             "If points_earned is positive, state exactly how many points this event earned. "
             "For a refill, confirm the pack was refilled to the supplied capacity in litres. If you mention the remaining amount, use litres. If you mention the amount used per wash, use millilitres. "
+            "Cashback is earned at 100 cumulative points per €1, using cashback_points_per_euro. "
+            "For cashback progress use points_to_next_cashback exactly as supplied. "
             "If cashback_unlocked_cents is positive, state the newly unlocked cashback in euros "
             "(100 cents is €1). Say it was earned, never that it was paid or transferred. "
             "Otherwise, for an event earning points, mention points_to_next_cashback until the next €1. "

@@ -91,6 +91,7 @@ def stock_message_payload(
         "event": event,
         "points_earned": points_earned,
         "total_points": pack.user_points,
+        "cashback_points_per_euro": pack.cashback_points_per_euro,
         "cashback_earned_cents": pack.cashback_earned_cents,
         "cashback_unlocked_cents": cashback_unlocked_cents,
         "points_to_next_cashback": pack.points_to_next_cashback,

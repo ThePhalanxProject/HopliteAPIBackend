@@ -67,7 +67,7 @@ returns `refill_recorded: true`. A usage or replay response returns false.
 null until the first refill. `full_doses_remaining` is the server-calculated
 integer wash count for the current stock.
 
-Every 50 cumulative points earns €1 of cashback. The API tracks earned
+Every 100 cumulative points earns €1 of cashback. The API tracks earned
 cashback without issuing payments or redemptions. Pack responses include
 `user_points`, `cashback_earned_cents`, and `points_to_next_cashback`.
 Usage and refill responses also include `points_earned`,

@@ -31,7 +31,7 @@ POSSIBLE_DOUBLE_USE_GAP = timedelta(seconds=30)
 REFILL_FORECAST_DAYS = 7
 USAGE_POINTS = 5
 REFILL_POINTS = 10
-POINTS_PER_EURO = 50
+POINTS_PER_EURO = 100
 REFILL_ALERT_MESSAGES = {
     "en": "Your detergent is running low. Please refill your Hoplite.",
     "fr": "Votre lessive est presque épuisée. Pensez à recharger votre Hoplite.",
@@ -59,6 +59,7 @@ class PackStatus(BaseModel):
     full_doses_remaining: int
     sample_count: int
     user_points: int
+    cashback_points_per_euro: int = POINTS_PER_EURO
     cashback_earned_cents: int
     points_to_next_cashback: int
     data_span_days: float
@@ -462,6 +463,23 @@ def read_event_oracle(request_id: UUID, user: PilotUser, db: Session, *, refill:
         raise HTTPException(404, "Refill message not found" if refill else "Usage message not found")
 
     saved_id, payload, message = saved
+    if payload.get("cashback_points_per_euro") != POINTS_PER_EURO:
+        total = payload["total_points"]
+        earned = payload["points_earned"]
+        payload = {
+            **payload,
+            "cashback_points_per_euro": POINTS_PER_EURO,
+            "cashback_earned_cents": (total // POINTS_PER_EURO) * 100,
+            "cashback_unlocked_cents": (
+                total // POINTS_PER_EURO - (total - earned) // POINTS_PER_EURO
+            ) * 100,
+            "points_to_next_cashback": POINTS_PER_EURO - total % POINTS_PER_EURO,
+        }
+        db.execute(update(oracle_model).where(event_id == saved_id).values(
+            payload=payload, message=None,
+        ))
+        db.commit()
+        message = None
     db.rollback()
     if message is None:
         message, _ = oracle_copy(payload, None)
