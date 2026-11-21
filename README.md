@@ -188,3 +188,14 @@ Major retailers remain first. Listed prices remain the actual prices. Saved
 preferences persist when old search snapshots expire and are cleared by the
 password-protected account reset. Both synchronous and progressive searches
 apply the scores and include preference_score in each returned offer.
+
+
+### Cashback progress across refills
+
+Use `cashback_progress_points` and `cashback_points_per_euro` for the reward
+progress indicator in all pack, usage and refill responses. These count reward
+progress across pack refills. A refill adds 10 points to the account.
+When an event returns positive `cashback_unlocked_cents`, show the earned
+reward before displaying progress toward the next euro. Reaching each 100
+points earns €1 and surplus points carry forward. Reuse the event request UUID
+on retries. A full account reset clears both reward progress and earned cashback.

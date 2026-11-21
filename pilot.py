@@ -73,6 +73,11 @@ class PackStatus(BaseModel):
 
     @computed_field
     @property
+    def cashback_progress_points(self) -> int:
+        return self.user_points % self.cashback_points_per_euro
+
+    @computed_field
+    @property
     def stock_status(self) -> Literal["not_started", "ok", "low", "urgent", "empty"]:
         if self.started_at is None:
             return "not_started"
