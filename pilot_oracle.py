@@ -328,6 +328,49 @@ def shopping_query(brand: str, language: str, country: str) -> str:
     return query
 
 
+OFFICIAL_RETAILER_SITES = {
+    "fr": {
+        "carrefour": "https://www.carrefour.fr/",
+        "e leclerc": "https://www.e.leclerc/",
+        "leclerc": "https://www.e.leclerc/",
+        "intermarche": "https://www.intermarche.com/",
+        "auchan": "https://www.auchan.fr/",
+        "super u": "https://www.coursesu.com/",
+        "hyper u": "https://www.coursesu.com/",
+        "courses u": "https://www.coursesu.com/",
+        "lidl": "https://www.lidl.fr/",
+    },
+}
+
+
+def outlet_homepage(retailer, country, links):
+    seller = " ".join(brand_words(retailer or ""))
+    if not seller:
+        return None
+    for name, homepage in OFFICIAL_RETAILER_SITES.get(country, {}).items():
+        if seller == name or seller.startswith(name + " "):
+            return homepage
+    seller_key = "".join(brand_words(retailer))
+    for link in links:
+        if not isinstance(link, str):
+            continue
+        try:
+            parsed = urlsplit(link)
+            host = parsed.hostname or ""
+            port = parsed.port
+        except ValueError:
+            continue
+        if parsed.scheme != "https" or parsed.username or parsed.password or port not in (None, 443):
+            continue
+        if re.search(r"(?:^|\\.)(?:google\\.[a-z.]+|bing\\.com|serpapi\\.com)$", host):
+            continue
+        # A matching merchant domain supplies evidence for sellers outside the registry.
+        domain_key = "".join(brand_words(host.replace("www.", "")))
+        if seller_key and seller_key in domain_key:
+            return f"https://{host}/"
+    return None
+
+
 def search_price_offers(brand, language, location, country, *, refresh=False, postal_code=None, preferences=None):
     key = getenv("SERPAPI_API_KEY")
     if not key:
@@ -374,6 +417,7 @@ def search_price_offers(brand, language, location, country, *, refresh=False, po
             "title": title, "retailer": retailer, "listed_price": price,
             "wash_count": washes, "currency": currency, "url": link,
             "price_per_wash": Decimal(str(amount)) / washes,
+            "outlet_url": outlet_homepage(retailer, country, (row.get("link"), row.get("product_link"))),
         })
 
     # Price ranking is meaningful only within a common currency.
@@ -413,9 +457,11 @@ def shopping_message_with_urls(offers, message, language):
         pack_price = re.sub(r"([0-9][0-9.,]*)", r"**\1**", offer["listed_price"])
         price_per_use = f'{offer["currency"]}**{offer["price_per_wash"]:.4f}**'
         outlet_text = f"**{outlet}** " if outlet else ""
+        homepage = offer.get("outlet_url")
+        link_text = homepage or ("Site officiel indisponible" if language == "fr" else "Official site unavailable")
         bullets.append(
             f'- {name} | Pack: {pack_price} | {per_use}: {price_per_use} | '
-            f'{outlet_text}{offer["url"]}'
+            f'{outlet_text}{link_text}'
         )
     return "\n".join(bullets), valid_names
 
@@ -423,7 +469,13 @@ def shopping_message_with_urls(offers, message, language):
 def summarize_price_offers(result, language, country):
     brand = result["reference_brand"]
     location = result["location"]
-    offers = result["offers"]
+    offers = [
+        {**offer, "outlet_url": offer.get("outlet_url") or outlet_homepage(
+            offer["retailer"], country, (offer["url"],),
+        )}
+        for offer in result["offers"]
+    ]
+    result = {**result, "offers": offers}
     if not offers:
         message = (
             f"Je n’ai trouvé aucune offre {brand} correspondant à votre recherche à {location} ({country.upper()})."
@@ -442,7 +494,7 @@ def summarize_price_offers(result, language, country):
                     "price_per_use": offer["price_per_wash"],
                     "currency": offer["currency"],
                     "outlet": offer["retailer"],
-                    "url": offer["url"],
+                    "url": offer["outlet_url"],
                 }
                 for offer in offers
             ],

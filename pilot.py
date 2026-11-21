@@ -579,7 +579,7 @@ def record_offer_preference(
     if search is None or not search.result:
         raise HTTPException(404, "Price search not found")
     offer = next((offer for offer in search.result.get("offers", [])
-                  if offer["url"] == event.offer_url), None)
+                  if event.offer_url in (offer["url"], offer.get("outlet_url"))), None)
     if offer is None:
         raise HTTPException(404, "Offer not found in this search")
     retailer = " ".join(brand_words(offer.get("retailer") or ""))
