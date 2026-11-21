@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import logging
 import re
 from decimal import Decimal
@@ -371,6 +373,88 @@ def outlet_homepage(retailer, country, links):
     return None
 
 
+def find_official_outlet(retailer, country, language, location):
+    """Search for a missing homepage and let Kimi select a returned source."""
+    if not retailer:
+        return None
+    key = getenv("SERPAPI_API_KEY")
+    if not key:
+        return None
+    record = pycountry.countries.get(alpha_2=country.upper())
+    country_name = record.name if record else country
+    try:
+        response = requests.get(
+            "https://serpapi.com/search.json",
+            params={
+                "engine": "google", "q": f"{retailer} {country_name} official online store",
+                "gl": country, "hl": language, "location": location, "api_key": key,
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        data = response.json()
+        rows = data.get("organic_results", [])
+        if data.get("error") or not isinstance(rows, list):
+            return None
+        candidates = []
+        for row in rows[:8]:
+            if not isinstance(row, dict):
+                continue
+            link = row.get("link")
+            if not isinstance(link, str):
+                continue
+            try:
+                parsed = urlsplit(link)
+                host = parsed.hostname or ""
+                port = parsed.port
+            except ValueError:
+                continue
+            if parsed.scheme != "https" or not host or parsed.username or parsed.password or port not in (None, 443):
+                continue
+            if re.search(r"(?:^|\.)(?:google\.[a-z.]+|bing\.com|serpapi\.com|facebook\.com|instagram\.com|wikipedia\.org)$", host):
+                continue
+            candidates.append({
+                "id": str(len(candidates)),
+                "title": str(row.get("title") or "")[:200],
+                "snippet": str(row.get("snippet") or "")[:600],
+                "homepage": f"https://{host}/",
+            })
+        if not candidates:
+            return None
+        answer = call_hoplite_agent({
+            "task": "outlet_homepage_lookup", "retailer": retailer,
+            "country": country_name, "city": location, "candidates": candidates,
+        }, pilot_mode=True)
+        selected = answer.get("message") if isinstance(answer, dict) else None
+        return next((candidate["homepage"] for candidate in candidates
+                     if candidate["id"] == selected), None)
+    except (requests.RequestException, ValueError, AttributeError, AgentError):
+        logger.warning("Official outlet lookup failed for %s in %s", retailer, country)
+        return None
+
+
+def resolve_outlet_sites(offers, country, language, location):
+    resolved = []
+    for offer in offers:
+        homepage = offer.get("outlet_url") or outlet_homepage(
+            offer["retailer"], country, (offer["url"],),
+        )
+        resolved.append({**offer, "outlet_url": homepage})
+    missing = {offer["retailer"] for offer in resolved
+               if not offer["outlet_url"] and offer["retailer"]}
+    # Resolve each seller once, concurrently, while retaining the original ranking.
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {seller: executor.submit(
+            find_official_outlet, seller, country, language, location,
+        ) for seller in missing}
+        found = {seller: future.result() for seller, future in futures.items()}
+    return [
+        {**offer, "outlet_url": offer["outlet_url"] or found.get(offer["retailer"])}
+        for offer in resolved
+        if offer["outlet_url"] or found.get(offer["retailer"])
+    ]
+
+
 def search_price_offers(brand, language, location, country, *, refresh=False, postal_code=None, preferences=None):
     key = getenv("SERPAPI_API_KEY")
     if not key:
@@ -457,8 +541,7 @@ def shopping_message_with_urls(offers, message, language):
         pack_price = re.sub(r"([0-9][0-9.,]*)", r"**\1**", offer["listed_price"])
         price_per_use = f'{offer["currency"]}**{offer["price_per_wash"]:.4f}**'
         outlet_text = f"**{outlet}** " if outlet else ""
-        homepage = offer.get("outlet_url")
-        link_text = homepage or ("Site officiel indisponible" if language == "fr" else "Official site unavailable")
+        link_text = offer["outlet_url"]
         bullets.append(
             f'- {name} | Pack: {pack_price} | {per_use}: {price_per_use} | '
             f'{outlet_text}{link_text}'
@@ -469,12 +552,7 @@ def shopping_message_with_urls(offers, message, language):
 def summarize_price_offers(result, language, country):
     brand = result["reference_brand"]
     location = result["location"]
-    offers = [
-        {**offer, "outlet_url": offer.get("outlet_url") or outlet_homepage(
-            offer["retailer"], country, (offer["url"],),
-        )}
-        for offer in result["offers"]
-    ]
+    offers = resolve_outlet_sites(result["offers"], country, language, location)
     result = {**result, "offers": offers}
     if not offers:
         message = (

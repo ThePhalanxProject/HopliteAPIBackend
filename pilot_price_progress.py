@@ -19,7 +19,8 @@ def price_search_snapshot(search: PilotPriceSearch, now: datetime) -> dict:
     result = search.result or {}
     status = search.status
     if elapsed >= 120 and status in {"searching", "summarizing"}:
-        status = "complete" if result.get("offers") else "failed"
+        result = {**result, "offers": [offer for offer in result.get("offers", []) if offer.get("outlet_url")]}
+        status = "complete" if result["offers"] else "failed"
         if status == "complete":
             result = {**result, "message_source": "unavailable"}
 
@@ -76,5 +77,6 @@ def run_price_search(search_id: str, query: PriceSearch, language: str) -> None:
         result = summarize_price_offers(result, language, query.country)
     except Exception as exc:
         logger.warning("Pilot price summary %s failed (%s)", search_id, type(exc).__name__)
-        result = {**result, "message": None, "message_source": "unavailable"}
+        result = {**result, "offers": [offer for offer in result["offers"] if offer.get("outlet_url")],
+                  "message": None, "message_source": "unavailable"}
     save_progress(search_id, "complete", result)
