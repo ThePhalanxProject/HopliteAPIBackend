@@ -395,6 +395,31 @@ def search_price_offers(brand, language, location, country, *, refresh=False, po
     return result
 
 
+def shopping_message_with_urls(offers, message, language):
+    """Assemble every bullet with prices and URLs from the verified search."""
+    lines = [line.strip() for line in (message or "").splitlines() if line.strip()]
+    valid_names = (
+        len(lines) == len(offers)
+        and all(line.startswith("- ") and len(line.split(" | ")) == 4 for line in lines)
+    )
+    per_use = "Par utilisation" if language == "fr" else "Per use"
+    bullets = []
+    for index, offer in enumerate(offers):
+        name = lines[index][2:].split(" | ")[0] if valid_names else offer["title"]
+        name = " ".join(name.split())[:200]
+        # Product and outlet labels are text; only prices use bold markup.
+        name = re.sub(r"[\\`*{}\[\]<>|]", "", name)
+        outlet = re.sub(r"[\\`*{}\[\]<>|]", "", " ".join((offer["retailer"] or "").split()))
+        pack_price = re.sub(r"([0-9][0-9.,]*)", r"**\1**", offer["listed_price"])
+        price_per_use = f'{offer["currency"]}**{offer["price_per_wash"]:.4f}**'
+        outlet_text = f"**{outlet}** " if outlet else ""
+        bullets.append(
+            f'- {name} | Pack: {pack_price} | {per_use}: {price_per_use} | '
+            f'{outlet_text}{offer["url"]}'
+        )
+    return "\n".join(bullets), valid_names
+
+
 def summarize_price_offers(result, language, country):
     brand = result["reference_brand"]
     location = result["location"]
@@ -428,7 +453,11 @@ def summarize_price_offers(result, language, country):
         },
         None,
     )
-    return {**result, "message": message, "message_source": source if message else "unavailable"}
+    message, used_kimi_names = shopping_message_with_urls(offers, message, language)
+    return {
+        **result, "message": message,
+        "message_source": source if used_kimi_names else "fallback",
+    }
 
 
 def pilot_prices(brand, language, location, country, *, refresh=False, postal_code=None, preferences=None):
