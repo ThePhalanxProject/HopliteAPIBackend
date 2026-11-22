@@ -201,13 +201,13 @@ points earns €1 and surplus points carry forward. Reuse the event request UUID
 on retries. A full account reset clears both reward progress and earned cashback.
 
 
-### Refill surveys in Primio
+### Usage and refill surveys in Primio
 
 After a successful refill, check `survey_required`, `survey_id`, and
 `survey_url` in the pack response. The same fields on `GET /pilot/pack`
 recover pending surveys after restart. Each successful refill creates one
 survey invitation. Request retries reuse it. Older pending surveys are shown
-first. Failed refills and usage taps create no survey.
+first. The first recorded usage also activates a survey if the account has no survey history.\nLater usage taps and retries create no extra survey.
 
 GET `survey_url` with the participant's bearer token to obtain the four
 localized questions. Submit answers with POST to that same URL:
@@ -247,5 +247,14 @@ The response includes `questions`, `language`, `version`, `can_submit`,
 `survey_id`, and `survey_url`. Render the returned questions directly.
 If `can_submit` is true, POST the four answers to `survey_url` using the
 existing survey submission format. If false, the questions are available for
-preview; a recorded refill creates the next invitation. Refresh this endpoint
+preview; the first recorded use activates the initial survey, and a recorded\nrefill creates the next invitation. Refresh this endpoint
 after submission to show the next pending survey or a completion state.
+
+
+The Surveys tab becomes submittable after one recorded use. Existing participants
+with recorded usage and no survey history are activated on their next pack-status
+or survey-questions request. Completed surveys survive reset, so reset and later
+usage do not create another first-use survey. Each recorded refill still creates
+its survey. Survey details and history now include `trigger` (`usage` or `refill`),
+`trigger_request_id`, and `triggered_at`. The older `refill_request_id` and
+`refilled_at` fields are null for usage-triggered surveys.

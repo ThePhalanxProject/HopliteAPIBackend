@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
-from pilot_surveys import SurveyAnswers, SurveyView, pending_survey, survey_questions, survey_view
+from pilot_surveys import SurveyAnswers, SurveyView, activate_usage_survey, pending_survey, survey_questions, survey_view
 from pilot_preferences import preference_scores
 from pilot_price_progress import price_search_snapshot, run_price_search
 from database import Base, SessionLocal, engine
@@ -291,6 +291,8 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> P
         result.refill_alert_message = (
             BURST_REFILL_ALERT_MESSAGES[language] if burst_triggered else REFILL_ALERT_MESSAGES[language]
         )
+    if usage_count:
+        activate_usage_survey(db, pack, language)
     survey = pending_survey(db, pack.user_id)
     if survey is not None:
         result.survey_required = True
@@ -649,7 +651,7 @@ def read_surveys(
     surveys = db.scalars(select(PilotRefillSurvey).where(
         PilotRefillSurvey.user_id == user.id,
     ).order_by(PilotRefillSurvey.refilled_at.desc(), PilotRefillSurvey.id).limit(limit).offset(offset))
-    return [survey_view(survey) for survey in surveys]
+    return [survey_view(survey, db) for survey in surveys]
 
 
 def get_survey(db, user_id, survey_id, *, lock=False):
@@ -667,8 +669,12 @@ def read_survey_questions(
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
 ):
+    pack = get_pack(db, user, lock=True)
+    language = message_language(db, user.id)
+    activate_usage_survey(db, pack, language)
     survey = pending_survey(db, user.id)
-    language = survey.language if survey else message_language(db, user.id)
+    language = survey.language if survey else language
+    db.commit()
     return {
         "version": survey.version if survey else 1,
         "language": language,
@@ -685,7 +691,7 @@ def read_survey(
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
 ):
-    return survey_view(get_survey(db, user.id, survey_id))
+    return survey_view(get_survey(db, user.id, survey_id), db)
 
 
 @router.post("/surveys/{survey_id}", response_model=SurveyView)
@@ -700,11 +706,11 @@ def submit_survey(
     if survey.submitted_at is not None:
         if any(getattr(survey, name) != value for name, value in values.items()):
             raise HTTPException(409, "This survey has already been submitted")
-        return survey_view(survey)
+        return survey_view(survey, db)
     for name, value in values.items():
         setattr(survey, name, value)
     survey.submitted_at = datetime.now(timezone.utc)
-    result = survey_view(survey)
+    result = survey_view(survey, db)
     db.commit()
     return result
 

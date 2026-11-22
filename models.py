@@ -164,3 +164,11 @@ class PilotRefillSurvey(Base):
     would_use_connected_product = Column(Boolean)
     found_useful = Column(Boolean)
     experience_feedback = Column(Text)
+
+
+class PilotUsageSurveyTrigger(Base):
+    __tablename__ = "pilot_usage_survey_triggers"
+
+    survey_id = Column(ForeignKey("pilot_refill_surveys.id"), primary_key=True)
+    request_id = Column(String(36), nullable=False)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
