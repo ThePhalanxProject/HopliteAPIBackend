@@ -67,7 +67,7 @@ returns `refill_recorded: true`. A usage or replay response returns false.
 null until the first refill. `full_doses_remaining` is the server-calculated
 integer wash count for the current stock.
 
-Every 100 cumulative points earns €5 of cashback. The API tracks earned
+Every 100 cumulative points earns €1 of cashback. The API tracks earned
 cashback without issuing payments or redemptions. Pack responses include
 `user_points`, `cashback_earned_cents`, and `points_to_next_cashback`.
 Usage and refill responses also include `points_earned`,
@@ -192,31 +192,14 @@ apply the scores and include preference_score in each returned offer.
 
 ### Cashback progress across refills
 
-Use `cashback_progress_points` and `cashback_points_per_reward` for the reward
+Use `cashback_progress_points` and `cashback_points_per_euro` for the reward
 progress indicator in all pack, usage and refill responses. These count reward
 progress across pack refills. A refill adds 10 points to the account.
 When an event returns positive `cashback_unlocked_cents`, show the earned
-reward before displaying progress toward the next €5 reward. Reaching each 100
-points earns €5 and surplus points carry forward. Reuse the event request UUID
+reward before displaying progress toward the next euro. Reaching each 100
+points earns €1 and surplus points carry forward. Reuse the event request UUID
 on retries. A full account reset clears the current reward progress and current-cycle earned
 cashback. Permanent milestone and reset history is preserved as described below.
-
-
-Reward policy fields are `cashback_points_per_reward: 100` and
-`cashback_reward_cents: 500`. Primio must use these for its progress threshold
-and reward label, and divide returned cent amounts by 100 for display. The
-informational `cashback_points_per_euro` is now 20; it is NOT the threshold for
-unlocking a reward. A new reward requires the full 100 points. Remove any
-hardcoded €1 label. No milestone history or account reset count is exposed.
-
-Existing recorded milestones retain their actual awarded amounts. Current-cycle
-`cashback_earned_cents` sums those records: a previous €1 plus a new €5 is €6.
-New milestones, including milestones reconstructed from retained activity that
-has no recorded award yet, use the current €5 policy. Previously recorded awards
-are never multiplied or rewritten. Old cached Oracle messages are refreshed with
-the current policy and language, while their historical earned/unlocked amounts
-remain unchanged. A full reset clears current-cycle earnings and preserves the
-historical award records in the database.
 
 
 ### Survey version 3 in Primio
@@ -343,7 +326,7 @@ The saved preference is retained by account activity resets.
 The backend permanently records every 100-point threshold (100, 200, 300, and
 so on within an account activity cycle), and every successfully processed
 account reset. Each milestone stores the user, cycle number, threshold,
-the cashback awarded in cents (500 for a new milestone), original timestamp, recording timestamp, source request UUID,
+100 cashback cents, original timestamp, recording timestamp, source request UUID,
 source event type, and whether it was reconstructed from retained activity.
 Each reset stores the user, reset number, timestamp, optional request UUID,
 and points before reset. A refill preserves the points cycle. An account reset

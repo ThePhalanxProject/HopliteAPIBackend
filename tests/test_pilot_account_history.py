@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from database import Base, SessionLocal, engine
 from main import app
-from models import PilotAccountResetEvent, PilotCashbackMilestone, PilotPack, PilotRefillEvent, PilotUsageEvent, PilotUsageOracle
+from models import PilotAccountResetEvent, PilotCashbackMilestone, PilotPack, PilotRefillEvent, PilotUsageEvent
 
 
 class AccountHistoryTests(unittest.TestCase):
@@ -66,7 +66,7 @@ class AccountHistoryTests(unittest.TestCase):
         result, key = self.event(h, 'refill')
         self.assertEqual(result['user_points'], 105)
         self.assertEqual(result['cashback_progress_points'], 5)
-        self.assertEqual(result['cashback_unlocked_cents'], 500)
+        self.assertEqual(result['cashback_unlocked_cents'], 100)
         self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 1)
         self.event(h, 'refill', key)
         self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 1)
@@ -75,7 +75,7 @@ class AccountHistoryTests(unittest.TestCase):
         self.assertEqual(result['user_points'], 200)
         self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 2)
         hist = self.history(h)
-        self.assertEqual(hist['lifetime_cashback_earned_cents'], 1000)
+        self.assertEqual(hist['lifetime_cashback_earned_cents'], 200)
         self.assertEqual([m['points_threshold'] for m in hist['milestones']], [200,100])
         self.assertEqual([m['source_event_type'] for m in hist['milestones']], ['usage','refill'])
         self.assertTrue(all(not m['reconstructed'] for m in hist['milestones']))
@@ -97,7 +97,7 @@ class AccountHistoryTests(unittest.TestCase):
         self.assertEqual(reset['cashback_earned_cents'], 0)
         self.assertEqual(self.history(h)['account_reset_count'], 1)
         self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 1)
-        self.assertEqual(self.history(h)['lifetime_cashback_earned_cents'], 500)
+        self.assertEqual(self.history(h)['lifetime_cashback_earned_cents'], 100)
         self.client.post('/pilot/auth/reset', headers=h, json=body)
         self.assertEqual(self.history(h)['account_reset_count'], 1)
         self.start(h)
@@ -108,7 +108,7 @@ class AccountHistoryTests(unittest.TestCase):
         for _ in range(19):
             result, _ = self.event(h)
         self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 2)
-        self.assertEqual(result['cashback_earned_cents'], 500)
+        self.assertEqual(result['cashback_earned_cents'], 100)
         hist = self.history(h)
         self.assertEqual([m['cycle_number'] for m in hist['milestones']], [1,0])
         self.assertEqual(hist['resets'][0]['points_before_reset'], 100)
@@ -159,79 +159,6 @@ class AccountHistoryTests(unittest.TestCase):
         self.assertEqual(self.history(other)['resets'], [])
         self.assertEqual(self.history(other)['milestones'], [])
         self.assertEqual(self.client.get('/pilot/account/history').status_code, 404)
-
-    def test_five_euro_reward_still_requires_one_hundred_points(self):
-        _, h = self.account()
-        self.start(h)
-        for i in range(1,20):
-            result, _ = self.event(h)
-            self.assertEqual(result['cashback_earned_cents'], 0)
-            self.assertEqual(result['cashback_unlocked_cents'], 0)
-            self.assertEqual(result['cashback_progress_points'], i*5)
-            self.assertEqual(result['points_to_next_cashback'], 100-i*5)
-            self.assertEqual(result['cashback_points_per_euro'], 20)
-            self.assertEqual(result['cashback_points_per_reward'], 100)
-            self.assertEqual(result['cashback_reward_cents'], 500)
-        result, key = self.event(h)
-        self.assertEqual(result['cashback_unlocked_cents'], 500)
-        self.assertEqual(result['cashback_earned_cents'], 500)
-        self.assertEqual(result['cashback_progress_points'], 0)
-        self.assertEqual(result['points_to_next_cashback'], 100)
-        retry, _ = self.event(h, request_id=key)
-        self.assertEqual(retry['cashback_unlocked_cents'], 0)
-        self.assertEqual(len(self.history(h)['milestones']), 1)
-
-    def test_existing_one_euro_records_and_cached_messages_keep_their_value(self):
-        _, h = self.account()
-        self.start(h)
-        for _ in range(20):
-            _, key = self.event(h)
-        # Simulate the previously deployed €1 rule and its cached event message.
-        with SessionLocal.begin() as db:
-            milestone = db.scalar(select(PilotCashbackMilestone))
-            milestone.cashback_cents = 100
-            usage = db.scalar(select(PilotUsageEvent).where(PilotUsageEvent.request_id==key))
-            saved = db.get(PilotUsageOracle, usage.id)
-            old = dict(saved.payload, cashback_points_per_euro=100,
-                       cashback_earned_cents=100, cashback_unlocked_cents=100)
-            old.pop('cashback_points_per_reward')
-            old.pop('cashback_reward_cents')
-            saved.payload = old
-            saved.message = 'Old reward message'
-        self.assertEqual(self.client.get('/pilot/pack', headers=h).json()['cashback_earned_cents'], 100)
-        with patch('pilot.oracle_copy', return_value=('Updated reward message','kimi')) as kimi:
-            r = self.client.post('/pilot/pack/usage/'+key+'/oracle', headers=h)
-            self.assertEqual(r.status_code, 200, r.text)
-            payload = kimi.call_args.args[0]
-            self.assertEqual(payload['cashback_reward_cents'], 500)
-            self.assertEqual(payload['cashback_unlocked_cents'], 100)
-            self.assertEqual(payload['cashback_earned_cents'], 100)
-        self.event(h, 'refill')
-        for _ in range(18):
-            result, _ = self.event(h)
-        self.assertEqual(result['user_points'], 200)
-        self.assertEqual(result['cashback_unlocked_cents'], 500)
-        self.assertEqual(result['cashback_earned_cents'], 600)
-        self.assertEqual([m['cashback_cents'] for m in self.history(h)['milestones']], [500,100])
-
-    def test_kimi_receives_five_euro_policy_in_both_languages(self):
-        _, h = self.account('fr')
-        self.start(h)
-        for _ in range(19):
-            self.event(h)
-        _, key = self.event(h, 'refill')
-        for language in ('fr','en'):
-            self.client.put('/pilot/preferences/message-language', headers=h, json={'language':language})
-            with patch('pilot.oracle_copy', return_value=('Reward message','kimi')) as kimi:
-                r = self.client.post('/pilot/pack/refill/'+key+'/oracle', headers=h)
-                self.assertEqual(r.status_code, 200, r.text)
-                payload = kimi.call_args.args[0]
-                self.assertEqual(payload['language'], language)
-                self.assertEqual(payload['cashback_points_per_reward'], 100)
-                self.assertEqual(payload['cashback_reward_cents'], 500)
-                self.assertEqual(payload['cashback_unlocked_cents'], 500)
-                self.assertEqual(payload['cashback_progress_points'], 5)
-                self.assertEqual(payload['points_to_next_cashback'], 95)
 
     def test_history_absent_from_all_app_responses_and_openapi(self):
         _, h = self.account()
