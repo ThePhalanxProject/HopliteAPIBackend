@@ -93,6 +93,8 @@ def stock_message_payload(
         "points_earned": points_earned,
         "total_points": pack.user_points,
         "cashback_points_per_euro": pack.cashback_points_per_euro,
+        "cashback_points_per_reward": pack.cashback_points_per_reward,
+        "cashback_reward_cents": pack.cashback_reward_cents,
         "cashback_progress_points": pack.cashback_progress_points,
         "cashback_earned_cents": pack.cashback_earned_cents,
         "cashback_unlocked_cents": cashback_unlocked_cents,
