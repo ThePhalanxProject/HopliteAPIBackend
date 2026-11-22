@@ -1,9 +1,4 @@
 """Persistent cashback and reset history. Callers hold the user's pack lock."""
-from datetime import datetime
-from typing import Literal
-from uuid import UUID
-
-from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, literal, select, union_all
 
 from models import PilotAccountResetEvent, PilotCashbackMilestone, PilotRefillEvent, PilotUsageEvent
@@ -13,40 +8,10 @@ REFILL_POINTS = 10
 POINTS_PER_EURO = 100
 
 
-class MilestoneView(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    cycle_number: int
-    milestone_number: int
-    points_threshold: int
-    cashback_cents: int
-    reached_at: datetime
-    recorded_at: datetime
-    source_request_id: UUID
-    source_event_type: Literal["usage", "refill"]
-    reconstructed: bool
-
-
-class ResetEventView(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    reset_number: int
-    request_id: UUID | None
-    occurred_at: datetime
-    points_before_reset: int
-
-
-class AccountHistoryView(BaseModel):
-    current_user_points: int
-    account_reset_count: int
-    lifetime_cashback_milestone_count: int
-    lifetime_cashback_earned_cents: int
-    milestones: list[MilestoneView]
-    resets: list[ResetEventView]
-    limit: int
-    offset: int
+def account_reset_count(db, user_id):
+    return db.scalar(select(func.coalesce(func.max(PilotAccountResetEvent.reset_number), 0)).where(
+        PilotAccountResetEvent.user_id == user_id,
+    ))
 
 
 def sync_cashback_history(db, pack, points, now, *, current_request_id=None):
@@ -56,16 +21,11 @@ def sync_cashback_history(db, pack, points, now, *, current_request_id=None):
     continues the current points cycle; an account reset starts another cycle.
     Events and their history are committed together by the caller.
     """
-    reset_count = db.scalar(select(func.coalesce(func.max(PilotAccountResetEvent.reset_number), 0)).where(
-        PilotAccountResetEvent.user_id == pack.user_id,
+    reset_count = account_reset_count(db, pack.user_id)
+    last_milestone = db.scalar(select(func.coalesce(func.max(PilotCashbackMilestone.milestone_number), 0)).where(
+        PilotCashbackMilestone.user_id == pack.user_id,
+        PilotCashbackMilestone.cycle_number == reset_count,
     ))
-    count, earned_cents, last_milestone = db.execute(select(
-        func.count(PilotCashbackMilestone.id),
-        func.coalesce(func.sum(PilotCashbackMilestone.cashback_cents), 0),
-        func.coalesce(func.max(PilotCashbackMilestone.milestone_number).filter(
-            PilotCashbackMilestone.cycle_number == reset_count,
-        ), 0),
-    ).where(PilotCashbackMilestone.user_id == pack.user_id)).one()
     if points // POINTS_PER_EURO > last_milestone:
         timeline = union_all(
             select(
@@ -95,11 +55,4 @@ def sync_cashback_history(db, pack, points, now, *, current_request_id=None):
                 reconstructed=event.request_id != current_request_id,
             ))
             last_milestone = number
-            count += 1
-            earned_cents += 100
         db.flush()
-    return {
-        "account_reset_count": reset_count,
-        "lifetime_cashback_milestone_count": count,
-        "lifetime_cashback_earned_cents": earned_cents,
-    }

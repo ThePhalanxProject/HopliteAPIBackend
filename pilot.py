@@ -16,12 +16,11 @@ from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
 from pilot_surveys import SURVEY_VERSION, LegacySurveyAnswers, VersionTwoSurveyAnswers, SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, save_survey_answers, saved_survey_answers, survey_questions, survey_view
 from pilot_language import account_language
-from pilot_account_history import AccountHistoryView, MilestoneView, ResetEventView, USAGE_POINTS, REFILL_POINTS, POINTS_PER_EURO, sync_cashback_history
+from pilot_account_history import USAGE_POINTS, REFILL_POINTS, POINTS_PER_EURO, sync_cashback_history
 from pilot_preferences import preference_scores
 from pilot_price_progress import price_search_snapshot, run_price_search, translate_price_search
 from database import Base, SessionLocal, engine
 from models import PilotBurstRefillAlert, PilotMessagePreference, PilotOfferPreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotRefillOracle, PilotRefillSurvey, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
-from models import PilotAccountResetEvent, PilotCashbackMilestone
 
 CAPACITY_ML = 1500
 DOSE_ML = 65
@@ -61,9 +60,6 @@ class PackStatus(BaseModel):
     full_doses_remaining: int
     sample_count: int
     user_points: int
-    account_reset_count: int = 0
-    lifetime_cashback_milestone_count: int = 0
-    lifetime_cashback_earned_cents: int = 0
     cashback_points_per_euro: int = POINTS_PER_EURO
     cashback_earned_cents: int
     points_to_next_cashback: int
@@ -243,6 +239,7 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str, *, m
     cycle_start = refill_at or pack.started_at
     started_at = _to_utc(cycle_start) if cycle_start is not None else None
     elapsed_days = (now - started_at).total_seconds() / 86400 if started_at else 0.0
+    sync_cashback_history(db, pack, points, now, current_request_id=milestone_request_id)
     result = PackStatus(
         language=language,
         started_at=started_at,
@@ -253,7 +250,6 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str, *, m
         full_doses_remaining=remaining // DOSE_ML,
         sample_count=count,
         user_points=points,
-        **sync_cashback_history(db, pack, points, now, current_request_id=milestone_request_id),
         cashback_earned_cents=(points // POINTS_PER_EURO) * 100,
         points_to_next_cashback=POINTS_PER_EURO - points % POINTS_PER_EURO,
         data_span_days=elapsed_days,
@@ -310,34 +306,6 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str, *, m
 def read_pack(user: PilotUser = Depends(participant), db: Session = Depends(get_db)):
     pack = get_pack(db, user, lock=True)
     result = pack_status(db, pack, datetime.now(timezone.utc), message_language(db, user.id))
-    db.commit()
-    return result
-
-
-@router.get("/account/history", response_model=AccountHistoryView)
-def read_account_history(
-    user: PilotUser = Depends(participant),
-    db: Session = Depends(get_db),
-    limit: int = Query(100, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-):
-    pack = get_pack(db, user, lock=True)
-    status = pack_status(db, pack, datetime.now(timezone.utc), message_language(db, user.id))
-    milestones = db.scalars(select(PilotCashbackMilestone).where(
-        PilotCashbackMilestone.user_id == user.id,
-    ).order_by(PilotCashbackMilestone.reached_at.desc(), PilotCashbackMilestone.id.desc()).limit(limit).offset(offset))
-    resets = db.scalars(select(PilotAccountResetEvent).where(
-        PilotAccountResetEvent.user_id == user.id,
-    ).order_by(PilotAccountResetEvent.reset_number.desc()).limit(limit).offset(offset))
-    result = AccountHistoryView(
-        current_user_points=status.user_points,
-        account_reset_count=status.account_reset_count,
-        lifetime_cashback_milestone_count=status.lifetime_cashback_milestone_count,
-        lifetime_cashback_earned_cents=status.lifetime_cashback_earned_cents,
-        milestones=[MilestoneView.model_validate(row) for row in milestones],
-        resets=[ResetEventView.model_validate(row) for row in resets],
-        limit=limit, offset=offset,
-    )
     db.commit()
     return result
 

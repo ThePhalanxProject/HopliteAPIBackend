@@ -19,6 +19,7 @@ from models import (
     PilotAccountResetEvent,
 )
 from pilot_language import header_language
+from pilot_account_history import account_reset_count
 from pilot import PackStatus, bearer, get_db, get_pack, message_language, pack_status, participant, token_digest
 
 router = APIRouter(prefix="/pilot/auth", tags=["pilot"])
@@ -162,7 +163,7 @@ def reset_account(
     # Capture earned thresholds before their source usage/refill rows are erased.
     before = pack_status(db, pack, now, message_language(db, user.id))
     db.add(PilotAccountResetEvent(
-        user_id=user.id, reset_number=before.account_reset_count + 1,
+        user_id=user.id, reset_number=account_reset_count(db, user.id) + 1,
         request_id=str(data.request_id) if data.request_id is not None else None,
         occurred_at=now, points_before_reset=before.user_points,
     ))

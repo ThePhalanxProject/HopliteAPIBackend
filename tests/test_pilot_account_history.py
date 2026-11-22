@@ -1,4 +1,4 @@
-"""Persistent reward/reset tracking through the authenticated HTTP API."""
+"""Database-only reward/reset tracking, exercised through normal account actions."""
 from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import patch
@@ -18,9 +18,12 @@ class AccountHistoryTests(unittest.TestCase):
         Base.metadata.drop_all(engine)
         Base.metadata.create_all(engine)
         self.client = TestClient(app)
+        self.user_ids = {}
 
     def account(self, language='en'):
-        return survey_tests.SurveyTests.account(self, language)
+        user_id, headers = survey_tests.SurveyTests.account(self, language)
+        self.user_ids[headers['Authorization']] = user_id
+        return user_id, headers
 
     def start(self, headers):
         r = self.client.post('/pilot/pack/start', headers=headers)
@@ -33,10 +36,25 @@ class AccountHistoryTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         return r.json(), request_id
 
-    def history(self, headers, query=''):
-        r = self.client.get('/pilot/account/history'+query, headers=headers)
-        self.assertEqual(r.status_code, 200, r.text)
-        return r.json()
+    def history(self, headers):
+        # Inspect the database directly; account history is never exposed by API.
+        user_id = self.user_ids[headers['Authorization']]
+        with SessionLocal() as db:
+            milestones = list(db.scalars(select(PilotCashbackMilestone).where(
+                PilotCashbackMilestone.user_id == user_id,
+            ).order_by(PilotCashbackMilestone.reached_at.desc(), PilotCashbackMilestone.id.desc())))
+            resets = list(db.scalars(select(PilotAccountResetEvent).where(
+                PilotAccountResetEvent.user_id == user_id,
+            ).order_by(PilotAccountResetEvent.reset_number.desc())))
+            def values(row):
+                return {column.name: getattr(row, column.name) for column in row.__table__.columns}
+            return {
+                'account_reset_count':len(resets),
+                'lifetime_cashback_milestone_count':len(milestones),
+                'lifetime_cashback_earned_cents':sum(row.cashback_cents for row in milestones),
+                'milestones':[values(row) for row in milestones],
+                'resets':[values(row) for row in resets],
+            }
 
     def test_usage_and_refill_milestones_and_retries(self):
         _, h = self.account()
@@ -44,28 +62,27 @@ class AccountHistoryTests(unittest.TestCase):
         for _ in range(19):
             result, _ = self.event(h)
         self.assertEqual(result['user_points'], 95)
-        self.assertEqual(result['lifetime_cashback_milestone_count'], 0)
+        self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 0)
         result, key = self.event(h, 'refill')
         self.assertEqual(result['user_points'], 105)
         self.assertEqual(result['cashback_progress_points'], 5)
         self.assertEqual(result['cashback_unlocked_cents'], 100)
-        self.assertEqual(result['lifetime_cashback_milestone_count'], 1)
-        self.assertEqual(self.event(h, 'refill', key)[0]['lifetime_cashback_milestone_count'], 1)
+        self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 1)
+        self.event(h, 'refill', key)
+        self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 1)
         for _ in range(19):
             result, _ = self.event(h)
         self.assertEqual(result['user_points'], 200)
-        self.assertEqual(result['lifetime_cashback_milestone_count'], 2)
+        self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 2)
         hist = self.history(h)
         self.assertEqual(hist['lifetime_cashback_earned_cents'], 200)
         self.assertEqual([m['points_threshold'] for m in hist['milestones']], [200,100])
         self.assertEqual([m['source_event_type'] for m in hist['milestones']], ['usage','refill'])
         self.assertTrue(all(not m['reconstructed'] for m in hist['milestones']))
         self.assertEqual(hist['milestones'][1]['source_request_id'], key)
-        self.assertEqual(len(self.history(h, '?limit=1')['milestones']), 1)
-        self.assertEqual(self.history(h, '?limit=1&offset=1')['milestones'][0]['points_threshold'], 100)
         # Polling and replaying a recorded event never increment the count.
         self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 2)
-        self.assertEqual(self.client.get('/pilot/pack', headers=h).json()['lifetime_cashback_milestone_count'], 2)
+        self.assertNotIn('lifetime_cashback_milestone_count', self.client.get('/pilot/pack', headers=h).json())
 
     def test_resets_preserve_history_and_start_another_points_cycle(self):
         user_id, h = self.account()
@@ -78,10 +95,11 @@ class AccountHistoryTests(unittest.TestCase):
         reset = r.json()
         self.assertEqual(reset['user_points'], 0)
         self.assertEqual(reset['cashback_earned_cents'], 0)
-        self.assertEqual(reset['account_reset_count'], 1)
-        self.assertEqual(reset['lifetime_cashback_milestone_count'], 1)
-        self.assertEqual(reset['lifetime_cashback_earned_cents'], 100)
-        self.assertEqual(self.client.post('/pilot/auth/reset', headers=h, json=body).json()['account_reset_count'], 1)
+        self.assertEqual(self.history(h)['account_reset_count'], 1)
+        self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 1)
+        self.assertEqual(self.history(h)['lifetime_cashback_earned_cents'], 100)
+        self.client.post('/pilot/auth/reset', headers=h, json=body)
+        self.assertEqual(self.history(h)['account_reset_count'], 1)
         self.start(h)
         self.event(h)
         # A delayed duplicate reset must not erase newly recorded activity.
@@ -89,7 +107,7 @@ class AccountHistoryTests(unittest.TestCase):
         self.assertEqual(duplicate.json()['user_points'], 5)
         for _ in range(19):
             result, _ = self.event(h)
-        self.assertEqual(result['lifetime_cashback_milestone_count'], 2)
+        self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 2)
         self.assertEqual(result['cashback_earned_cents'], 100)
         hist = self.history(h)
         self.assertEqual([m['cycle_number'] for m in hist['milestones']], [1,0])
@@ -97,7 +115,7 @@ class AccountHistoryTests(unittest.TestCase):
         # Password-only clients remain compatible; each accepted reset counts.
         r = self.client.post('/pilot/auth/reset', headers=h, json={'password':'survey-test-password'})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(r.json()['account_reset_count'], 2)
+        self.assertEqual(self.history(h)['account_reset_count'], 2)
         with SessionLocal() as db:
             self.assertEqual(db.scalar(select(func.count()).select_from(PilotCashbackMilestone).where(PilotCashbackMilestone.user_id==user_id)), 2)
             self.assertEqual(db.scalar(select(func.count()).select_from(PilotAccountResetEvent).where(PilotAccountResetEvent.user_id==user_id)), 2)
@@ -122,7 +140,7 @@ class AccountHistoryTests(unittest.TestCase):
         self.assertEqual(hist['lifetime_cashback_milestone_count'], 1)
         self.assertTrue(hist['milestones'][0]['reconstructed'])
         self.assertEqual(hist['milestones'][0]['source_request_id'], source)
-        self.assertEqual(datetime.fromisoformat(hist['milestones'][0]['reached_at']).replace(tzinfo=timezone.utc), reached_at)
+        self.assertEqual(hist['milestones'][0]['reached_at'].replace(tzinfo=timezone.utc), reached_at)
         self.assertEqual(hist['resets'][0]['points_before_reset'], 100)
         with SessionLocal() as db:
             self.assertEqual(db.scalar(select(func.count()).select_from(PilotUsageEvent)), 0)
@@ -140,7 +158,26 @@ class AccountHistoryTests(unittest.TestCase):
         self.assertEqual(self.history(other)['account_reset_count'], 0)
         self.assertEqual(self.history(other)['resets'], [])
         self.assertEqual(self.history(other)['milestones'], [])
-        self.assertEqual(self.client.get('/pilot/account/history').status_code, 401)
+        self.assertEqual(self.client.get('/pilot/account/history').status_code, 404)
+
+    def test_history_absent_from_all_app_responses_and_openapi(self):
+        _, h = self.account()
+        hidden = {'account_reset_count', 'lifetime_cashback_milestone_count', 'lifetime_cashback_earned_cents'}
+        def assert_private(response):
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(hidden.isdisjoint(response.json()))
+        assert_private(self.client.get('/pilot/pack', headers=h))
+        assert_private(self.client.post('/pilot/pack/start', headers=h))
+        for kind in ['usage','refill']:
+            assert_private(self.client.post('/pilot/pack/'+kind+'?defer_oracle=true', headers=h,
+                           json={'request_id':str(uuid4())}))
+        assert_private(self.client.post('/pilot/auth/reset', headers=h, json={'password':'survey-test-password'}))
+        self.assertEqual(self.history(h)['account_reset_count'], 1)
+        self.assertEqual(self.client.get('/pilot/account/history', headers=h).status_code, 404)
+        schema = self.client.get('/openapi.json').json()
+        self.assertNotIn('/pilot/account/history', schema['paths'])
+        for model in schema['components']['schemas'].values():
+            self.assertTrue(hidden.isdisjoint(model.get('properties', {})))
 
     def test_failed_reset_rolls_back_deletions_and_reset_record(self):
         _, h = self.account()
@@ -162,7 +199,7 @@ class AccountHistoryTests(unittest.TestCase):
         self.assertEqual(r.status_code, 500)
         status = self.client.get('/pilot/pack', headers=h).json()
         self.assertEqual(status['user_points'], 5)
-        self.assertEqual(status['account_reset_count'], 0)
+        self.assertEqual(self.history(h)['account_reset_count'], 0)
         self.assertEqual(self.history(h)['resets'], [])
 
     def test_failed_usage_rolls_back_milestone_and_source_event(self):
@@ -179,9 +216,10 @@ class AccountHistoryTests(unittest.TestCase):
         self.assertEqual(r.status_code, 500)
         status = self.client.get('/pilot/pack', headers=h).json()
         self.assertEqual(status['user_points'], 95)
-        self.assertEqual(status['lifetime_cashback_milestone_count'], 0)
+        self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 0)
         self.assertEqual(self.history(h)['milestones'], [])
-        self.assertEqual(self.event(h)[0]['lifetime_cashback_milestone_count'], 1)
+        self.event(h)
+        self.assertEqual(self.history(h)['lifetime_cashback_milestone_count'], 1)
 
 
 if __name__ == '__main__':

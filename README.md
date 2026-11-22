@@ -321,64 +321,41 @@ locally generated messages, and display the human-readable API text directly.
 The saved preference is retained by account activity resets.
 
 
-### Permanent cashback milestone and account reset history
+### Database-only cashback milestone and account reset history
 
-The backend records every 100-point threshold: 100, 200, 300, and so on within
-an account activity cycle. Each threshold earns 100 cents at the existing rate.
-A refill adds 10 points and preserves the cycle. An account reset clears the
-current points and starts a new cycle, while preserving all milestone records
-and the count of successful resets. This tracks rewards earned, not payments.
+The backend permanently records every 100-point threshold (100, 200, 300, and
+so on within an account activity cycle), and every successfully processed
+account reset. Each milestone stores the user, cycle number, threshold,
+100 cashback cents, original timestamp, recording timestamp, source request UUID,
+source event type, and whether it was reconstructed from retained activity.
+Each reset stores the user, reset number, timestamp, optional request UUID,
+and points before reset. A refill preserves the points cycle. An account reset
+clears current points and starts another cycle; both history tables survive.
 
-Pack status, usage, refill, start and reset responses now include:
+This history is for database inspection only. It is not returned in pack,
+usage, refill, start, reset or Oracle responses. There is no account-history
+API endpoint and no history fields in the public response schemas. Primio
+requires no changes and must not send separate tracking events. Existing
+current-cycle rewards and reward messages retain their previous behavior.
 
-- `account_reset_count`: successful account resets recorded by this feature.
-- `lifetime_cashback_milestone_count`: all recorded 100-point milestones across resets.
-- `lifetime_cashback_earned_cents`: sum of the cashback in those milestone records.
+Tables are `pilot_cashback_milestones` and `pilot_account_resets`; application
+startup creates them without altering existing columns. Their counts can be
+calculated directly in SQL. Neither table references resettable activity rows.
+Writes use the source activity's transaction and pack lock. Usage/refill retries
+and polling do not duplicate milestones; failed requests leave no history rows.
+The existing reset request also supports an optional UUID `request_id`. Reusing
+it for retries of one reset prevents duplicate resets, while each distinct reset
+uses a new UUID. Password-only requests remain supported; without an ID the
+server cannot distinguish retries from deliberate additional resets.
+Incorrect passwords and failed transactions do not count.
 
-The existing `user_points`, `cashback_progress_points`, `cashback_earned_cents`,
-and `cashback_unlocked_cents` retain their current-cycle meanings. The new
-lifetime fields survive resets. Ordinary usage/refill retries and pack polling
-do not create duplicate milestones. Writes use the same transaction and pack
-lock as the source activity; failed requests do not leave milestone/reset rows.
-
-Authenticated GET `/pilot/account/history?limit=100&offset=0` returns the current
-points, the three counters above, and two arrays:
-
-- `milestones`: ID, cycle number, milestone number within the cycle, points
-  threshold, cashback cents, time reached, time recorded, source request UUID,
-  source event type (`usage` or `refill`), and a `reconstructed` flag.
-- `resets`: ID, reset number, optional request UUID, time, and points before reset.
-
-Both arrays use the same pagination parameters (maximum limit 200), newest first.
-Counters describe all recorded history, regardless of pagination. Each user can
-only read their own history. Tables are `pilot_cashback_milestones` and
-`pilot_account_resets`; application startup creates them without altering existing
-columns. They have no foreign keys to resettable usage/refill rows.
-
-Tracking is automatic; Primio need not send separate tracking events. To make
-reset retries safe, send an optional UUID with the existing password request:
-
-```json
-{
-  "password": "the user's password",
-  "request_id": "e20b5717-cc84-4780-b6f5-83b141f9449f"
-}
-```
-
-Use a new UUID for each deliberate reset, reusing the same UUID for retries of
-that reset. A duplicate returns current status and does not reset subsequent
-activity. Password-only clients remain supported, but the server cannot identify
-retries without an ID and counts each successfully processed reset request.
-Incorrect passwords and failed transactions do not count as resets.
-
-Historical coverage: reset counting starts when this feature is deployed.
-Earlier resets are not reconstructable from the existing schema. The first pack
-or account-history read (or a new event/reset) recovers milestones from any
-usage/refill records still stored in the current cycle. Their original event
-timestamps are preserved and `reconstructed` is true. Activity deleted by an
-earlier account reset cannot be recovered. A reset first saves any recoverable
-milestones before erasing its source usage/refill data. These additions do not
-restore old points or issue extra cashback notifications.
+Reset counting starts when the tracking feature is deployed. Earlier resets
+cannot be reconstructed reliably from the existing schema. A pack read, new
+event, or reset recovers milestones from any usage/refill records still stored
+in the current cycle, preserving the original event timestamps and setting
+`reconstructed` to true. Activity deleted by an earlier reset cannot be recovered.
+A reset saves recoverable milestones before erasing the source activity. This
+does not restore old points or issue extra cashback notifications.
 
 To inspect the totals per participant in psql:
 
