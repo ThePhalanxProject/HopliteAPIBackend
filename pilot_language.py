@@ -26,6 +26,7 @@ FRENCH_ERRORS = {
     "This offer has no identified retailer": "Le commerçant de cette offre n’a pas été identifié.",
     "Refresh prices before recording this preference": "Actualisez les prix avant d’enregistrer cette préférence.",
     "Survey not found": "Questionnaire introuvable.",
+    "Answer all six survey questions": "Veuillez répondre aux six questions du questionnaire.",
     "This survey is no longer active. Refresh the survey tab.": "Ce questionnaire n’est plus actif. Actualisez l’onglet Questionnaires.",
     "This survey has already been submitted": "Ce questionnaire a déjà été envoyé.",
     "Shopping search is temporarily unavailable": "La recherche de prix est temporairement indisponible.",

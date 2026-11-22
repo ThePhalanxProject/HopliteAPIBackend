@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
-from pilot_surveys import SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, survey_questions, survey_view
+from pilot_surveys import SURVEY_VERSION, LegacySurveyAnswers, SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, save_survey_answers, saved_survey_answers, survey_questions, survey_view
 from pilot_language import account_language
 from pilot_preferences import preference_scores
 from pilot_price_progress import price_search_snapshot, run_price_search, translate_price_search
@@ -685,7 +685,7 @@ def read_survey_questions(
     survey = pending_survey(db, user.id)
     db.commit()
     return {
-        "version": survey.version if survey else 1,
+        "version": SURVEY_VERSION,
         "language": language,
         "questions": survey_questions(language),
         "survey_id": survey.id if survey else None,
@@ -706,7 +706,7 @@ def read_survey(
 @router.post("/surveys/{survey_id}", response_model=SurveyView)
 def submit_survey(
     survey_id: UUID,
-    answers: SurveyAnswers,
+    answers: SurveyAnswers | LegacySurveyAnswers,
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
 ):
@@ -717,11 +717,12 @@ def submit_survey(
         raise HTTPException(409, "This survey is no longer active. Refresh the survey tab.")
     values = answers.model_dump()
     if survey.submitted_at is not None:
-        if any(getattr(survey, name) != value for name, value in values.items()):
+        if saved_survey_answers(survey, db).model_dump() != values:
             raise HTTPException(409, "This survey has already been submitted")
         return survey_view(survey, db)
-    for name, value in values.items():
-        setattr(survey, name, value)
+    if not isinstance(answers, SurveyAnswers):
+        raise HTTPException(422, "Answer all six survey questions")
+    save_survey_answers(survey, answers, db)
     survey.submitted_at = datetime.now(timezone.utc)
     result = survey_view(survey, db)
     db.commit()

@@ -3,11 +3,13 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from pilot_language import account_language
-from models import PilotRefillSurvey, PilotUsageEvent, PilotUsageSurveyTrigger, PilotSurveyCycle
+from models import PilotRefillSurvey, PilotUsageEvent, PilotUsageSurveyTrigger, PilotSurveyCycle, PilotSurveyAdditionalAnswers
+
+SURVEY_VERSION = 2
 
 SURVEY_QUESTIONS = {
     "en": (
@@ -15,21 +17,32 @@ SURVEY_QUESTIONS = {
         "Would you use it if we added other features and connected it to your product?",
         "Did you find it useful?",
         "How would you like us to enhance your experience?",
+        "Are you happy to share your usage data anonymously to refine your search?",
+        "Are you prepared to pay between 20€ and 30€ for a device that removes your need to press the refill button each time and ensures that the product never runs out?",
     ),
     "fr": (
         "Avez-vous apprécié l’application ?",
         "L’utiliseriez-vous si nous ajoutions d’autres fonctionnalités et la connections à votre produit ?",
         "L’avez-vous trouvée utile ?",
         "Comment aimeriez-vous que nous améliorions votre expérience ?",
+        "Acceptez-vous de partager anonymement vos données d’utilisation pour affiner votre recherche ?",
+        "Seriez-vous prêt(e) à payer entre 20 € et 30 € pour un appareil qui vous évite d’appuyer sur le bouton de recharge à chaque fois et garantit que le produit ne soit jamais épuisé ?",
     ),
 }
 
 
-class SurveyAnswers(BaseModel):
+class LegacySurveyAnswers(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enjoyed_application: bool = Field(strict=True)
     would_use_connected_product: bool = Field(strict=True)
     found_useful: bool = Field(strict=True)
     experience_feedback: str = Field(min_length=1, max_length=2000, pattern=r"\S")
+
+
+class SurveyAnswers(LegacySurveyAnswers):
+    share_anonymous_usage_data: bool = Field(strict=True)
+    would_pay_for_device: bool = Field(strict=True)
 
 
 class SurveyView(BaseModel):
@@ -43,22 +56,47 @@ class SurveyView(BaseModel):
     language: Literal["en", "fr"]
     submitted_at: datetime | None
     questions: list[dict]
-    answers: SurveyAnswers | None
+    answers: SurveyAnswers | LegacySurveyAnswers | None
 
 
-def survey_questions(language):
-    answer_names = tuple(SurveyAnswers.model_fields)
+def survey_questions(language, version=SURVEY_VERSION):
+    answer_names = tuple((LegacySurveyAnswers if version == 1 else SurveyAnswers).model_fields)
     return [
-        {"id": name, "text": text, "answer_type": "yes_no" if index < 3 else "text",
-         **({"max_length": 2000} if index == 3 else {})}
+        {"id": name, "text": text, "answer_type": "text" if name == "experience_feedback" else "yes_no",
+         **({"max_length": 2000} if name == "experience_feedback" else {})}
         for index, (name, text) in enumerate(zip(answer_names, SURVEY_QUESTIONS[language]))
     ]
+
+
+def saved_survey_answers(survey, db):
+    if survey.submitted_at is None:
+        return None
+    values = {name: getattr(survey, name) for name in LegacySurveyAnswers.model_fields}
+    if survey.version == 1:
+        return LegacySurveyAnswers(**values)
+    extra = db.get(PilotSurveyAdditionalAnswers, survey.id)
+    return SurveyAnswers(**values, **{
+        name: getattr(extra, name) for name in SurveyAnswers.model_fields
+        if name not in LegacySurveyAnswers.model_fields
+    })
+
+
+def save_survey_answers(survey, answers, db):
+    for name in LegacySurveyAnswers.model_fields:
+        setattr(survey, name, getattr(answers, name))
+    db.add(PilotSurveyAdditionalAnswers(
+        survey_id=survey.id,
+        share_anonymous_usage_data=answers.share_anonymous_usage_data,
+        would_pay_for_device=answers.would_pay_for_device,
+    ))
+    survey.version = SURVEY_VERSION
+    db.flush()
 
 
 def survey_view(survey, db):
     language = account_language(db, survey.user_id)
     usage_trigger = db.get(PilotUsageSurveyTrigger, survey.id)
-    answer_names = tuple(SurveyAnswers.model_fields)
+    version = survey.version if survey.submitted_at is not None else SURVEY_VERSION
     return SurveyView(
         survey_id=survey.id,
         trigger="usage" if usage_trigger else "refill",
@@ -66,10 +104,9 @@ def survey_view(survey, db):
         triggered_at=usage_trigger.occurred_at if usage_trigger else survey.refilled_at,
         refill_request_id=None if usage_trigger else survey.refill_request_id,
         refilled_at=None if usage_trigger else survey.refilled_at,
-        version=survey.version, language=language,
-        submitted_at=survey.submitted_at, questions=survey_questions(language),
-        answers=SurveyAnswers(**{name: getattr(survey, name) for name in answer_names})
-        if survey.submitted_at is not None else None,
+        version=version, language=language,
+        submitted_at=survey.submitted_at, questions=survey_questions(language, version),
+        answers=saved_survey_answers(survey, db),
     )
 
 
@@ -109,7 +146,7 @@ def activate_usage_survey(db, pack, language):
     # Public trigger fields describe the actual event; refill aliases are null.
     survey = PilotRefillSurvey(
         id=str(uuid4()), user_id=pack.user_id, refill_request_id=str(uuid4()),
-        refilled_at=first_use.occurred_at, version=1, language=language,
+        refilled_at=first_use.occurred_at, version=SURVEY_VERSION, language=language,
     )
     db.add(survey)
     db.flush()

@@ -207,23 +207,26 @@ After the first recorded usage following enrollment or reset, check `survey_requ
 `survey_url` in the pack response. The same fields on `GET /pilot/pack`
 recover pending surveys after restart. Each account can submit one survey per reset. Request retries reuse its
 survey invitation. Older pending surveys are shown
-first. The first recorded usage after enrollment or reset activates the survey.\nLater usage taps and retries create no extra survey.
+first. The first recorded usage after enrollment or reset activates the survey.
+Later usage taps and retries create no extra survey.
 
-GET `survey_url` with the participant's bearer token to obtain the four
-localized questions. Submit answers with POST to that same URL:
+GET `survey_url` with the participant's bearer token to obtain the six
+localized questions (survey version 2). Submit answers with POST to that same URL:
 
 ```json
 {
   "enjoyed_application": true,
   "would_use_connected_product": true,
   "found_useful": false,
-  "experience_feedback": "The experience would be better if..."
+  "experience_feedback": "The experience would be better if...",
+  "share_anonymous_usage_data": false,
+  "would_pay_for_device": true
 }
 ```
 
-All four answers are required. The first three are JSON booleans displayed as
-Yes/No. The fourth is nonblank text of at most 2000 characters. On success,
-refresh pack status for the next pending survey. An identical submission retry
+All six answers are required. Questions 1–3 and 5–6 are strict JSON booleans
+displayed as Yes/No. Question 4 is nonblank text of at most 2000 characters. On success,
+refresh pack status to show survey completion. An identical submission retry
 returns the saved answers; changing a completed survey returns 409.
 GET `/pilot/surveys?limit=100&offset=0` returns the signed-in user's survey
 history. Survey records, timestamps and answers survive the account reset.
@@ -231,8 +234,10 @@ history. Survey records, timestamps and answers survive the account reset.
 Administrators can query the database by participant or registered email:
 
 ```sql
-SELECT u.participant_code, l.email, s.*
+SELECT u.participant_code, l.email, s.*,
+       a.share_anonymous_usage_data, a.would_pay_for_device
 FROM pilot_refill_surveys s
+LEFT JOIN pilot_survey_additional_answers a ON a.survey_id = s.id
 JOIN pilot_users u ON u.id = s.user_id
 LEFT JOIN pilot_logins l ON l.user_id = u.id
 WHERE u.participant_code = 'SMOKE-B'
@@ -240,15 +245,37 @@ ORDER BY s.refilled_at;
 ```
 
 
+Version 2 appends these questions after the existing four, with English/French
+text supplied by the backend using the saved account language:
+
+- `share_anonymous_usage_data`: “Are you happy to share your usage data anonymously to refine your search?”
+- `would_pay_for_device`: “Are you prepared to pay between 20€ and 30€ for a device that removes your need to press the refill button each time and ensures that the product never runs out?”
+
+Previously submitted version-1 responses retain their four questions and answers;
+missing answers to the new questions are never inferred. Pending invitations
+expose version 2 and require all six answers. Updating the survey does not reopen
+completed surveys. Identical version-1 submission retries remain supported.
+The two additional answers are stored in `pilot_survey_additional_answers`,
+linked to the original survey and its user. Application startup creates this
+new table automatically; no alteration of existing survey columns is needed.
+Both new answers survive account activity resets with survey history. This
+survey records the user's answer; it does not itself start sharing data or
+charge for a device.
+
+For regression checks, install `httpx` alongside the application dependencies
+and run `python -m unittest discover -s tests -v`. Tests use a temporary SQLite
+database and do not connect to the deployed database.
+
+
 ### Opening the Surveys tab
 
 On each tab entry, call authenticated GET `/pilot/surveys/questions`.
 The response includes `questions`, `language`, `version`, `can_submit`,
 `survey_id`, and `survey_url`. Render the returned questions directly.
-If `can_submit` is true, POST the four answers to `survey_url` using the
+If `can_submit` is true, POST all six answers to `survey_url` using the
 existing survey submission format. If false, the questions are available for
-preview; the first recorded use activates the initial survey, and a recorded\nrefill creates the next invitation. Refresh this endpoint
-after submission to show the next pending survey or a completion state.
+preview; the first recorded use following enrollment or account reset activates
+the survey. Refresh this endpoint after submission to show completion.
 
 
 The Surveys tab becomes submittable after one recorded use in the current

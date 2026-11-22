@@ -174,6 +174,15 @@ class PilotUsageSurveyTrigger(Base):
     occurred_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class PilotSurveyAdditionalAnswers(Base):
+    """Version-two answers without altering the deployed survey table."""
+    __tablename__ = "pilot_survey_additional_answers"
+
+    survey_id = Column(ForeignKey("pilot_refill_surveys.id"), primary_key=True)
+    share_anonymous_usage_data = Column(Boolean, nullable=False)
+    would_pay_for_device = Column(Boolean, nullable=False)
+
+
 class PilotSurveyCycle(Base):
     __tablename__ = "pilot_survey_cycles"
 
