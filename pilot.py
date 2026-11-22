@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
-from pilot_surveys import SurveyAnswers, SurveyView, pending_survey, survey_view
+from pilot_surveys import SurveyAnswers, SurveyView, pending_survey, survey_questions, survey_view
 from pilot_preferences import preference_scores
 from pilot_price_progress import price_search_snapshot, run_price_search
 from database import Base, SessionLocal, engine
@@ -660,6 +660,23 @@ def get_survey(db, user_id, survey_id, *, lock=False):
     if survey is None:
         raise HTTPException(404, "Survey not found")
     return survey
+
+
+@router.get("/surveys/questions")
+def read_survey_questions(
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    survey = pending_survey(db, user.id)
+    language = survey.language if survey else message_language(db, user.id)
+    return {
+        "version": survey.version if survey else 1,
+        "language": language,
+        "questions": survey_questions(language),
+        "survey_id": survey.id if survey else None,
+        "survey_url": f"/pilot/surveys/{survey.id}" if survey else None,
+        "can_submit": survey is not None,
+    }
 
 
 @router.get("/surveys/{survey_id}", response_model=SurveyView)

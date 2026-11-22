@@ -238,3 +238,14 @@ LEFT JOIN pilot_logins l ON l.user_id = u.id
 WHERE u.participant_code = 'SMOKE-B'
 ORDER BY s.refilled_at;
 ```
+
+
+### Opening the Surveys tab
+
+On each tab entry, call authenticated GET `/pilot/surveys/questions`.
+The response includes `questions`, `language`, `version`, `can_submit`,
+`survey_id`, and `survey_url`. Render the returned questions directly.
+If `can_submit` is true, POST the four answers to `survey_url` using the
+existing survey submission format. If false, the questions are available for
+preview; a recorded refill creates the next invitation. Refresh this endpoint
+after submission to show the next pending survey or a completion state.

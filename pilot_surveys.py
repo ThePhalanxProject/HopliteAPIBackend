@@ -42,17 +42,19 @@ class SurveyView(BaseModel):
     answers: SurveyAnswers | None
 
 
-def survey_view(survey):
+def survey_questions(language):
     answer_names = tuple(SurveyAnswers.model_fields)
-    questions = [
+    return [
         {"id": name, "text": text, "answer_type": "yes_no" if index < 3 else "text",
          **({"max_length": 2000} if index == 3 else {})}
-        for index, (name, text) in enumerate(zip(answer_names, SURVEY_QUESTIONS[survey.language]))
+        for index, (name, text) in enumerate(zip(answer_names, SURVEY_QUESTIONS[language]))
     ]
+def survey_view(survey):
+    answer_names = tuple(SurveyAnswers.model_fields)
     return SurveyView(
         survey_id=survey.id, refill_request_id=survey.refill_request_id,
         refilled_at=survey.refilled_at, version=survey.version, language=survey.language,
-        submitted_at=survey.submitted_at, questions=questions,
+        submitted_at=survey.submitted_at, questions=survey_questions(survey.language),
         answers=SurveyAnswers(**{name: getattr(survey, name) for name in answer_names})
         if survey.submitted_at is not None else None,
     )
