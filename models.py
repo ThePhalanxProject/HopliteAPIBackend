@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Float, String, DateTime, Text, JSON, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Boolean, Integer, Float, String, DateTime, Text, JSON, ForeignKey, UniqueConstraint
 from datetime import datetime
 
 from database import Base
@@ -146,3 +146,21 @@ class PilotOfferPreference(Base):
     country = Column(String(2), nullable=False)
     action = Column(String(10), nullable=False)
     occurred_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class PilotRefillSurvey(Base):
+    __tablename__ = "pilot_refill_surveys"
+    __table_args__ = (UniqueConstraint("user_id", "refill_request_id"),)
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(ForeignKey("pilot_users.id"), nullable=False, index=True)
+    # Keep the request UUID independently of resettable refill activity.
+    refill_request_id = Column(String(36), nullable=False)
+    refilled_at = Column(DateTime(timezone=True), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    language = Column(String(2), nullable=False)
+    submitted_at = Column(DateTime(timezone=True))
+    enjoyed_application = Column(Boolean)
+    would_use_connected_product = Column(Boolean)
+    found_useful = Column(Boolean)
+    experience_feedback = Column(Text)

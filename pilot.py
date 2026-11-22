@@ -14,10 +14,11 @@ from sqlalchemy.orm import Session
 
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
+from pilot_surveys import SurveyAnswers, SurveyView, pending_survey, survey_view
 from pilot_preferences import preference_scores
 from pilot_price_progress import price_search_snapshot, run_price_search
 from database import Base, SessionLocal, engine
-from models import PilotBurstRefillAlert, PilotMessagePreference, PilotOfferPreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotRefillOracle, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
+from models import PilotBurstRefillAlert, PilotMessagePreference, PilotOfferPreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotRefillOracle, PilotRefillSurvey, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
 
 CAPACITY_ML = 1500
 DOSE_ML = 65
@@ -67,6 +68,9 @@ class PackStatus(BaseModel):
     days_remaining: float | None = None
     estimated_runout_at: datetime | None = None
     usage_overuse: dict = Field(default_factory=dict, exclude=True)
+    survey_required: bool = False
+    survey_id: str | None = None
+    survey_url: str | None = None
     refill_needed: bool = False
     refill_reason: Literal["high_utilization", "normal"] | None = None
     refill_alert_message: str | None = None
@@ -287,6 +291,11 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> P
         result.refill_alert_message = (
             BURST_REFILL_ALERT_MESSAGES[language] if burst_triggered else REFILL_ALERT_MESSAGES[language]
         )
+    survey = pending_survey(db, pack.user_id)
+    if survey is not None:
+        result.survey_required = True
+        result.survey_id = survey.id
+        result.survey_url = f"/pilot/surveys/{survey.id}"
     return result
 
 
@@ -386,6 +395,16 @@ def record_pack_event(db, user, request_id, language, *, refill, defer_oracle=Fa
             )
             points_earned = USAGE_POINTS
         db.add(pack_event)
+        if refill:
+            survey = db.scalar(select(PilotRefillSurvey).where(
+                PilotRefillSurvey.user_id == user.id,
+                PilotRefillSurvey.refill_request_id == request_id,
+            ))
+            if survey is None:
+                db.add(PilotRefillSurvey(
+                    id=str(uuid4()), user_id=user.id, refill_request_id=request_id,
+                    refilled_at=now, language=language, version=1,
+                ))
         db.flush()
         result = pack_status(db, pack, now, language)
         if usage_context is not None:
@@ -618,6 +637,59 @@ def record_offer_preference(
         country=country, action=event.action, occurred_at=datetime.now(timezone.utc),
     ))
     db.commit()
+
+
+@router.get("/surveys", response_model=list[SurveyView])
+def read_surveys(
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    surveys = db.scalars(select(PilotRefillSurvey).where(
+        PilotRefillSurvey.user_id == user.id,
+    ).order_by(PilotRefillSurvey.refilled_at.desc(), PilotRefillSurvey.id).limit(limit).offset(offset))
+    return [survey_view(survey) for survey in surveys]
+
+
+def get_survey(db, user_id, survey_id, *, lock=False):
+    query = select(PilotRefillSurvey).where(
+        PilotRefillSurvey.id == str(survey_id), PilotRefillSurvey.user_id == user_id,
+    )
+    survey = db.scalar(query.with_for_update() if lock else query)
+    if survey is None:
+        raise HTTPException(404, "Survey not found")
+    return survey
+
+
+@router.get("/surveys/{survey_id}", response_model=SurveyView)
+def read_survey(
+    survey_id: UUID,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    return survey_view(get_survey(db, user.id, survey_id))
+
+
+@router.post("/surveys/{survey_id}", response_model=SurveyView)
+def submit_survey(
+    survey_id: UUID,
+    answers: SurveyAnswers,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    survey = get_survey(db, user.id, survey_id, lock=True)
+    values = answers.model_dump()
+    if survey.submitted_at is not None:
+        if any(getattr(survey, name) != value for name, value in values.items()):
+            raise HTTPException(409, "This survey has already been submitted")
+        return survey_view(survey)
+    for name, value in values.items():
+        setattr(survey, name, value)
+    survey.submitted_at = datetime.now(timezone.utc)
+    result = survey_view(survey)
+    db.commit()
+    return result
 
 
 def provision_participant(db: Session, participant_code: str) -> str:

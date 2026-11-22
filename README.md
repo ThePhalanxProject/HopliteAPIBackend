@@ -199,3 +199,42 @@ When an event returns positive `cashback_unlocked_cents`, show the earned
 reward before displaying progress toward the next euro. Reaching each 100
 points earns €1 and surplus points carry forward. Reuse the event request UUID
 on retries. A full account reset clears both reward progress and earned cashback.
+
+
+### Refill surveys in Primio
+
+After a successful refill, check `survey_required`, `survey_id`, and
+`survey_url` in the pack response. The same fields on `GET /pilot/pack`
+recover pending surveys after restart. Each successful refill creates one
+survey invitation. Request retries reuse it. Older pending surveys are shown
+first. Failed refills and usage taps create no survey.
+
+GET `survey_url` with the participant's bearer token to obtain the four
+localized questions. Submit answers with POST to that same URL:
+
+```json
+{
+  "enjoyed_application": true,
+  "would_use_connected_product": true,
+  "found_useful": false,
+  "experience_feedback": "The experience would be better if..."
+}
+```
+
+All four answers are required. The first three are JSON booleans displayed as
+Yes/No. The fourth is nonblank text of at most 2000 characters. On success,
+refresh pack status for the next pending survey. An identical submission retry
+returns the saved answers; changing a completed survey returns 409.
+GET `/pilot/surveys?limit=100&offset=0` returns the signed-in user's survey
+history. Survey records, timestamps and answers survive the account reset.
+
+Administrators can query the database by participant or registered email:
+
+```sql
+SELECT u.participant_code, l.email, s.*
+FROM pilot_refill_surveys s
+JOIN pilot_users u ON u.id = s.user_id
+LEFT JOIN pilot_logins l ON l.user_id = u.id
+WHERE u.participant_code = 'SMOKE-B'
+ORDER BY s.refilled_at;
+```
