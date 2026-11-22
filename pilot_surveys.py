@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from pilot_language import account_language
 from models import PilotRefillSurvey, PilotUsageEvent, PilotUsageSurveyTrigger, PilotSurveyCycle
 
 SURVEY_QUESTIONS = {
@@ -55,6 +56,7 @@ def survey_questions(language):
 
 
 def survey_view(survey, db):
+    language = account_language(db, survey.user_id)
     usage_trigger = db.get(PilotUsageSurveyTrigger, survey.id)
     answer_names = tuple(SurveyAnswers.model_fields)
     return SurveyView(
@@ -64,8 +66,8 @@ def survey_view(survey, db):
         triggered_at=usage_trigger.occurred_at if usage_trigger else survey.refilled_at,
         refill_request_id=None if usage_trigger else survey.refill_request_id,
         refilled_at=None if usage_trigger else survey.refilled_at,
-        version=survey.version, language=survey.language,
-        submitted_at=survey.submitted_at, questions=survey_questions(survey.language),
+        version=survey.version, language=language,
+        submitted_at=survey.submitted_at, questions=survey_questions(language),
         answers=SurveyAnswers(**{name: getattr(survey, name) for name in answer_names})
         if survey.submitted_at is not None else None,
     )

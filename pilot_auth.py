@@ -1,8 +1,10 @@
+from typing import Literal
+
 from datetime import datetime, timedelta, timezone
 from hashlib import scrypt
 from secrets import compare_digest, token_bytes, token_urlsafe
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -10,10 +12,11 @@ from sqlalchemy.orm import Session
 
 from consumption import _to_utc
 from models import (
-    PilotBurstRefillAlert, PilotLogin, PilotOfferPreference, PilotPriceSearch, PilotRefillAlert,
+    PilotBurstRefillAlert, PilotLogin, PilotMessagePreference, PilotOfferPreference, PilotPriceSearch, PilotRefillAlert,
     PilotRefillEvent, PilotRefillOracle, PilotSession, PilotSurveyCycle, PilotUsageEvent,
     PilotUsageOracle, PilotUser,
 )
+from pilot_language import header_language
 from pilot import PackStatus, bearer, get_db, get_pack, message_language, pack_status, participant, token_digest
 
 router = APIRouter(prefix="/pilot/auth", tags=["pilot"])
@@ -22,6 +25,7 @@ router = APIRouter(prefix="/pilot/auth", tags=["pilot"])
 class LoginRequest(BaseModel):
     email: str = Field(max_length=254, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
     password: str = Field(min_length=8, max_length=128)
+    language: Literal["en", "fr"] | None = None
 
 
 class EnrollmentRequest(LoginRequest):
@@ -34,6 +38,7 @@ class LoginResult(BaseModel):
     email: str
     display_name: str
     access_token: str
+    language: Literal["en", "fr"]
 
 
 def password_digest(password, salt):
@@ -49,11 +54,13 @@ def create_session(db, account, now):
         expires_at=now + timedelta(days=7),
     ))
     return LoginResult(id=str(account.user_id), email=account.email,
-                       display_name=account.display_name, access_token=token)
+                       display_name=account.display_name, access_token=token,
+                       language=message_language(db, account.user_id))
 
 
 @router.post("/enroll", response_model=LoginResult)
-def enroll(data: EnrollmentRequest, db: Session = Depends(get_db)):
+def enroll(data: EnrollmentRequest, request: Request, db: Session = Depends(get_db)):
+    request.state.language = data.language or header_language(request)
     user = db.scalar(select(PilotUser).where(
         PilotUser.token_hash == token_digest(data.invitation_token)
     ).with_for_update())
@@ -66,8 +73,10 @@ def enroll(data: EnrollmentRequest, db: Session = Depends(get_db)):
         password_hash=f"{salt.hex()}:{password_digest(data.password, salt)}",
     )
     db.add(account)
-    result = create_session(db, account, datetime.now(timezone.utc))
+    db.merge(PilotMessagePreference(user_id=user.id, language=request.state.language))
     try:
+        db.flush()
+        result = create_session(db, account, datetime.now(timezone.utc))
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -91,13 +100,17 @@ def verify_password(db, account, password, now, *, error_status, error_message):
 
 
 @router.post("/login", response_model=LoginResult)
-def login(data: LoginRequest, db: Session = Depends(get_db)):
+def login(data: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    request.state.language = data.language or header_language(request)
     now = datetime.now(timezone.utc)
     account = db.scalar(select(PilotLogin).where(PilotLogin.email == data.email.lower()).with_for_update())
     if account is None:
         password_digest(data.password, b"\0" * 16)
         raise HTTPException(401, "Invalid email or password")
     verify_password(db, account, data.password, now, error_status=401, error_message="Invalid email or password")
+    if data.language is not None:
+        db.merge(PilotMessagePreference(user_id=account.user_id, language=data.language))
+        db.flush()
     db.execute(delete(PilotSession).where(
         PilotSession.user_id == account.user_id, PilotSession.expires_at <= now
     ))

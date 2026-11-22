@@ -15,8 +15,9 @@ from sqlalchemy.orm import Session
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
 from pilot_surveys import SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, survey_questions, survey_view
+from pilot_language import account_language
 from pilot_preferences import preference_scores
-from pilot_price_progress import price_search_snapshot, run_price_search
+from pilot_price_progress import price_search_snapshot, run_price_search, translate_price_search
 from database import Base, SessionLocal, engine
 from models import PilotBurstRefillAlert, PilotMessagePreference, PilotOfferPreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotRefillOracle, PilotRefillSurvey, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
 
@@ -54,6 +55,7 @@ class UsageTap(BaseModel):
 class PackStatus(BaseModel):
     started_at: datetime | None
     last_refill_at: datetime | None = None
+    language: Literal["en", "fr"] = "en"
     current_volume_l: float
     capacity_l: float
     dose_ml: int
@@ -135,8 +137,7 @@ class MessagePreference(BaseModel):
 
 
 def message_language(db: Session, user_id: int) -> str:
-    preference = db.get(PilotMessagePreference, user_id)
-    return preference.language if preference else "en"
+    return account_language(db, user_id)
 
 
 @router.get("/preferences/message-language", response_model=MessagePreference)
@@ -241,6 +242,7 @@ def pack_status(db: Session, pack: PilotPack, now: datetime, language: str) -> P
     started_at = _to_utc(cycle_start) if cycle_start is not None else None
     elapsed_days = (now - started_at).total_seconds() / 86400 if started_at else 0.0
     result = PackStatus(
+        language=language,
         started_at=started_at,
         last_refill_at=_to_utc(refill_at) if refill_at is not None else None,
         current_volume_l=remaining / 1000,
@@ -368,7 +370,7 @@ def record_pack_event(db, user, request_id, language, *, refill, defer_oracle=Fa
         model.pack_id == pack.id, model.request_id == request_id
     ))
     now = datetime.now(timezone.utc)
-    language = language or message_language(db, user.id)
+    language = message_language(db, user.id)
     before = pack_status(db, pack, now, language)
     result = before
     points_earned = 0
@@ -429,7 +431,7 @@ def record_pack_event(db, user, request_id, language, *, refill, defer_oracle=Fa
     db.commit()
     if defer_oracle:
         oracle = OracleMessage(
-            stock_status=result.stock_status, message=None,
+            stock_status=result.stock_status, message=None, language=language,
             source="deferred" if oracle_url else "skipped",
             refill_alert_message=result.refill_alert_message,
         )
@@ -479,12 +481,17 @@ def read_event_oracle(request_id: UUID, user: PilotUser, db: Session, *, refill:
         raise HTTPException(404, "Refill message not found" if refill else "Usage message not found")
 
     saved_id, payload, message = saved
-    if payload.get("cashback_points_per_euro") != POINTS_PER_EURO:
+    current_language = message_language(db, user.id)
+    if (
+        payload.get("cashback_points_per_euro") != POINTS_PER_EURO
+        or payload.get("language") != current_language
+    ):
         total = payload["total_points"]
         earned = payload["points_earned"]
         payload = {
             **payload,
             "cashback_points_per_euro": POINTS_PER_EURO,
+            "language": current_language,
             "cashback_earned_cents": (total // POINTS_PER_EURO) * 100,
             "cashback_unlocked_cents": (
                 total // POINTS_PER_EURO - (total - earned) // POINTS_PER_EURO
@@ -508,7 +515,7 @@ def read_event_oracle(request_id: UUID, user: PilotUser, db: Session, *, refill:
                 event_id == saved_id
             ))
     return OracleMessage(
-        stock_status=payload["stock_status"],
+        stock_status=payload["stock_status"], language=payload["language"],
         message=message,
         source="kimi" if message else "unavailable",
     )
@@ -521,7 +528,7 @@ def read_oracle(
     language: str | None = Query(None, pattern="^(en|fr)$"),
 ):
     pack = get_pack(db, user, lock=True)
-    language = language or message_language(db, user.id)
+    language = message_language(db, user.id)
     status = pack_status(db, pack, datetime.now(timezone.utc), language)
     db.commit()
     return stock_message(status, language)
@@ -536,7 +543,7 @@ def search_prices(
     progressive: bool = False,
 ):
     user_id = user.id
-    language = query.language or message_language(db, user_id)
+    language = message_language(db, user_id)
     if progressive:
         now = datetime.now(timezone.utc)
         db.execute(delete(PilotPriceSearch).where(
@@ -545,7 +552,7 @@ def search_prices(
         search = PilotPriceSearch(
             id=str(uuid4()), user_id=user_id, created_at=now, status="searching",
         )
-        snapshot = price_search_snapshot(search, now)
+        snapshot = {**price_search_snapshot(search, now), "language": language}
         db.add(search)
         db.commit()
         tasks.add_task(run_price_search, snapshot["search_id"], query, language)
@@ -569,6 +576,7 @@ def search_prices(
 @router.get("/prices/{search_id}")
 def read_price_search(
     search_id: UUID,
+    tasks: BackgroundTasks,
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
 ):
@@ -577,10 +585,22 @@ def read_price_search(
         PilotPriceSearch.id == str(search_id),
         PilotPriceSearch.user_id == user.id,
         PilotPriceSearch.created_at >= now - timedelta(hours=1),
-    ))
+    ).with_for_update())
     if search is None:
         raise HTTPException(404, "Price search not found")
-    return price_search_snapshot(search, now)
+    language = message_language(db, user.id)
+    if (
+        search.status == "complete" and search.result
+        and search.result.get("language") != language
+    ):
+        search.result = {
+            **search.result, "language": language, "message": None,
+            "message_source": None,
+        }
+        search.status = "summarizing"
+        db.commit()
+        tasks.add_task(translate_price_search, search.id, language)
+    return {**price_search_snapshot(search, now), "language": language}
 
 
 class OfferInteraction(BaseModel):
@@ -663,7 +683,6 @@ def read_survey_questions(
     language = message_language(db, user.id)
     activate_usage_survey(db, pack, language)
     survey = pending_survey(db, user.id)
-    language = survey.language if survey else language
     db.commit()
     return {
         "version": survey.version if survey else 1,

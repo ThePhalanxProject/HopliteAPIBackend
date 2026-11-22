@@ -8,6 +8,7 @@ from sqlalchemy import update
 from consumption import _to_utc
 from database import SessionLocal
 from models import PilotPriceSearch
+from pilot_language import account_language
 from pilot_preferences import preference_scores
 from pilot_oracle import PriceSearch, search_price_offers, summarize_price_offers
 
@@ -80,3 +81,22 @@ def run_price_search(search_id: str, query: PriceSearch, language: str) -> None:
         result = {**result, "offers": [offer for offer in result["offers"] if offer.get("outlet_url")],
                   "message": None, "message_source": "unavailable"}
     save_progress(search_id, "complete", result)
+
+
+def translate_price_search(search_id, language):
+    """Translate a saved search without repeating its shopping request."""
+    with SessionLocal() as db:
+        search = db.get(PilotPriceSearch, search_id)
+        if search is None or not search.result:
+            return
+        result = dict(search.result)
+    try:
+        translated = summarize_price_offers(result, language, result["country"])
+    except Exception as exc:
+        logger.warning("Price translation %s failed (%s)", search_id, type(exc).__name__)
+        translated = {**result, "message": None, "message_source": "unavailable"}
+    with SessionLocal.begin() as db:
+        search = db.get(PilotPriceSearch, search_id, with_for_update=True)
+        if search is not None and search.result.get("language") == language:
+            search.result = translated
+            search.status = "complete"

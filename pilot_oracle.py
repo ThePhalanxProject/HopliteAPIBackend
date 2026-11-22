@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class OracleMessage(BaseModel):
+    language: str = "en"
     stock_status: str
     refill_alert_message: str | None = None
     message: str | None
@@ -114,7 +115,7 @@ def stock_message(
     message, _ = oracle_copy(payload, None, generate=generate)
     source = "kimi" if message else "unavailable" if generate else "skipped"
     return OracleMessage(
-        stock_status=pack.stock_status, message=message, source=source,
+        stock_status=pack.stock_status, message=message, source=source, language=language,
         refill_alert_message=pack.refill_alert_message,
     )
 
@@ -521,7 +522,7 @@ def search_price_offers(brand, language, location, country, *, refresh=False, po
     for offer in offers:
         offer["price_per_wash"] = float(round(offer["price_per_wash"], 4))
         offer["preference_score"] = (preferences or {}).get(" ".join(brand_words(offer["retailer"] or "")), 0)
-    result = {"location": location, "reference_brand": brand, "reference_volume_l": 1.5, "country": country, "offers": offers}
+    result = {"location": location, "reference_brand": brand, "reference_volume_l": 1.5, "country": country, "language": language, "offers": offers}
     return result
 
 
@@ -555,7 +556,7 @@ def summarize_price_offers(result, language, country):
     brand = result["reference_brand"]
     location = result["location"]
     offers = resolve_outlet_sites(result["offers"], country, language, location)
-    result = {**result, "offers": offers}
+    result = {**result, "offers": offers, "language": language}
     if not offers:
         message = (
             f"Je n’ai trouvé aucune offre {brand} correspondant à votre recherche à {location} ({country.upper()})."

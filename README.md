@@ -80,7 +80,7 @@ The authenticated `POST /pilot/prices` endpoint takes the brand and shopping
 location from Primio, for example
 `{"brand":"Ariel","city":"Amiens, France","country":"fr"}`.
 Country is a two-letter country code. The participant's saved message language
-applies unless the request includes an explicit language. The search covers any
+applies to every authenticated request. The search covers any
 pack size of the selected liquid laundry detergent brand. Eligible offers must
 state a wash count in the title. Ranking uses
 listed item price per wash, excluding delivery. Mixed currencies are not compared.
@@ -96,7 +96,7 @@ Each pilot participant can save their Oracle message language using
 `PUT /pilot/preferences/message-language` with `{"language":"fr"}` or
 `{"language":"en"}`. The corresponding GET returns the saved setting,
 defaulting to English. Stock, tap, and shopping messages use the saved
-setting when the request omits an explicit language override.
+setting for every authenticated request.
 
 ### Pilot app sign-in
 
@@ -257,3 +257,29 @@ another survey. The existing password-protected `POST /pilot/auth/reset`
 starts a new survey cycle along with the activity reset. One subsequent use
 activates a new survey. Earlier answers remain in survey history and in the
 database. POSTing to a survey from an earlier cycle returns 409.
+
+
+### Account language in Primio
+
+The supported account languages are `en` and `fr`. On language selection,
+send authenticated PUT `/pilot/preferences/message-language` with
+`{"language":"fr"}` or `{"language":"en"}`, then refresh the visible screens.
+GET the same endpoint on app restart. The saved account preference controls
+Oracle messages, alerts, price summaries, survey questions and pilot API
+error messages. Legacy request-specific language values do not override it.
+
+Enrollment and login optionally accept `language`; a successful request saves
+an explicit choice, and both return the saved `language`. If login omits it,
+the account's saved choice is retained. Send `Accept-Language: fr` or `en`
+for unauthenticated errors and login validation. Authenticated errors use the
+saved preference and include the `Content-Language` response header.
+
+Pack and Oracle responses include `language`. Survey text uses the saved
+choice even when an invitation was created in the other language. Saved Oracle
+messages are regenerated in the chosen language when fetched. A completed price
+snapshot in the other language is translated in the background on the next GET;
+continue polling its status URL. This reuses the saved offers.
+
+Primio must apply its own English/French locale to tabs, buttons, dialogs and
+locally generated messages, and display the human-readable API text directly.
+The saved preference is retained by account activity resets.
