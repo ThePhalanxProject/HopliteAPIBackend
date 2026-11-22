@@ -198,7 +198,8 @@ progress across pack refills. A refill adds 10 points to the account.
 When an event returns positive `cashback_unlocked_cents`, show the earned
 reward before displaying progress toward the next euro. Reaching each 100
 points earns €1 and surplus points carry forward. Reuse the event request UUID
-on retries. A full account reset clears both reward progress and earned cashback.
+on retries. A full account reset clears the current reward progress and current-cycle earned
+cashback. Permanent milestone and reset history is preserved as described below.
 
 
 ### Survey version 3 in Primio
@@ -318,3 +319,99 @@ continue polling its status URL. This reuses the saved offers.
 Primio must apply its own English/French locale to tabs, buttons, dialogs and
 locally generated messages, and display the human-readable API text directly.
 The saved preference is retained by account activity resets.
+
+
+### Permanent cashback milestone and account reset history
+
+The backend records every 100-point threshold: 100, 200, 300, and so on within
+an account activity cycle. Each threshold earns 100 cents at the existing rate.
+A refill adds 10 points and preserves the cycle. An account reset clears the
+current points and starts a new cycle, while preserving all milestone records
+and the count of successful resets. This tracks rewards earned, not payments.
+
+Pack status, usage, refill, start and reset responses now include:
+
+- `account_reset_count`: successful account resets recorded by this feature.
+- `lifetime_cashback_milestone_count`: all recorded 100-point milestones across resets.
+- `lifetime_cashback_earned_cents`: sum of the cashback in those milestone records.
+
+The existing `user_points`, `cashback_progress_points`, `cashback_earned_cents`,
+and `cashback_unlocked_cents` retain their current-cycle meanings. The new
+lifetime fields survive resets. Ordinary usage/refill retries and pack polling
+do not create duplicate milestones. Writes use the same transaction and pack
+lock as the source activity; failed requests do not leave milestone/reset rows.
+
+Authenticated GET `/pilot/account/history?limit=100&offset=0` returns the current
+points, the three counters above, and two arrays:
+
+- `milestones`: ID, cycle number, milestone number within the cycle, points
+  threshold, cashback cents, time reached, time recorded, source request UUID,
+  source event type (`usage` or `refill`), and a `reconstructed` flag.
+- `resets`: ID, reset number, optional request UUID, time, and points before reset.
+
+Both arrays use the same pagination parameters (maximum limit 200), newest first.
+Counters describe all recorded history, regardless of pagination. Each user can
+only read their own history. Tables are `pilot_cashback_milestones` and
+`pilot_account_resets`; application startup creates them without altering existing
+columns. They have no foreign keys to resettable usage/refill rows.
+
+Tracking is automatic; Primio need not send separate tracking events. To make
+reset retries safe, send an optional UUID with the existing password request:
+
+```json
+{
+  "password": "the user's password",
+  "request_id": "e20b5717-cc84-4780-b6f5-83b141f9449f"
+}
+```
+
+Use a new UUID for each deliberate reset, reusing the same UUID for retries of
+that reset. A duplicate returns current status and does not reset subsequent
+activity. Password-only clients remain supported, but the server cannot identify
+retries without an ID and counts each successfully processed reset request.
+Incorrect passwords and failed transactions do not count as resets.
+
+Historical coverage: reset counting starts when this feature is deployed.
+Earlier resets are not reconstructable from the existing schema. The first pack
+or account-history read (or a new event/reset) recovers milestones from any
+usage/refill records still stored in the current cycle. Their original event
+timestamps are preserved and `reconstructed` is true. Activity deleted by an
+earlier account reset cannot be recovered. A reset first saves any recoverable
+milestones before erasing its source usage/refill data. These additions do not
+restore old points or issue extra cashback notifications.
+
+To inspect the totals per participant in psql:
+
+```sql
+SELECT u.participant_code, l.email,
+       COALESCE(m.milestone_count, 0) AS cashback_milestone_count,
+       COALESCE(m.cashback_cents, 0) AS lifetime_cashback_earned_cents,
+       COALESCE(r.reset_count, 0) AS account_reset_count
+FROM pilot_users u
+LEFT JOIN pilot_logins l ON l.user_id = u.id
+LEFT JOIN (
+    SELECT user_id, COUNT(*) AS milestone_count, SUM(cashback_cents) AS cashback_cents
+    FROM pilot_cashback_milestones GROUP BY user_id
+) m ON m.user_id = u.id
+LEFT JOIN (
+    SELECT user_id, COUNT(*) AS reset_count
+    FROM pilot_account_resets GROUP BY user_id
+) r ON r.user_id = u.id
+ORDER BY u.participant_code;
+```
+
+For event timestamps and points immediately before each reset:
+
+```sql
+SELECT u.participant_code, m.*
+FROM pilot_cashback_milestones m
+JOIN pilot_users u ON u.id = m.user_id
+WHERE u.participant_code = 'SMOKE-B'
+ORDER BY m.reached_at;
+
+SELECT u.participant_code, r.*
+FROM pilot_account_resets r
+JOIN pilot_users u ON u.id = r.user_id
+WHERE u.participant_code = 'SMOKE-B'
+ORDER BY r.reset_number;
+```

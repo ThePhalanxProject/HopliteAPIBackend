@@ -1,4 +1,5 @@
 from typing import Literal
+from uuid import UUID
 
 from datetime import datetime, timedelta, timezone
 from hashlib import scrypt
@@ -15,6 +16,7 @@ from models import (
     PilotBurstRefillAlert, PilotLogin, PilotMessagePreference, PilotOfferPreference, PilotPriceSearch, PilotRefillAlert,
     PilotRefillEvent, PilotRefillOracle, PilotSession, PilotSurveyCycle, PilotUsageEvent,
     PilotUsageOracle, PilotUser,
+    PilotAccountResetEvent,
 )
 from pilot_language import header_language
 from pilot import PackStatus, bearer, get_db, get_pack, message_language, pack_status, participant, token_digest
@@ -130,6 +132,7 @@ def logout(credentials=Depends(bearer), db: Session = Depends(get_db)):
 
 class ResetAccountRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
+    request_id: UUID | None = None
 
 
 @router.post("/reset", response_model=PackStatus)
@@ -147,6 +150,22 @@ def reset_account(
     verify_password(db, account, data.password, now, error_status=403, error_message="Incorrect password")
 
     pack = get_pack(db, user, lock=True)
+    if data.request_id is not None:
+        duplicate = db.scalar(select(PilotAccountResetEvent.id).where(
+            PilotAccountResetEvent.user_id == user.id,
+            PilotAccountResetEvent.request_id == str(data.request_id),
+        ))
+        if duplicate is not None:
+            result = pack_status(db, pack, now, message_language(db, user.id))
+            db.commit()
+            return result
+    # Capture earned thresholds before their source usage/refill rows are erased.
+    before = pack_status(db, pack, now, message_language(db, user.id))
+    db.add(PilotAccountResetEvent(
+        user_id=user.id, reset_number=before.account_reset_count + 1,
+        request_id=str(data.request_id) if data.request_id is not None else None,
+        occurred_at=now, points_before_reset=before.user_points,
+    ))
     usage_ids = select(PilotUsageEvent.id).where(PilotUsageEvent.pack_id == pack.id)
     refill_ids = select(PilotRefillEvent.id).where(PilotRefillEvent.pack_id == pack.id)
     db.execute(delete(PilotUsageOracle).where(PilotUsageOracle.usage_id.in_(usage_ids)))

@@ -201,3 +201,37 @@ class PilotSurveyAnswers(Base):
     would_pay_for_device = Column(Boolean, nullable=False)
     share_anonymous_usage_and_demographic_data = Column(Boolean, nullable=False)
     comments = Column(Text, nullable=False)
+
+
+class PilotCashbackMilestone(Base):
+    """Permanent record of each 100-point threshold, surviving activity resets."""
+    __tablename__ = "pilot_cashback_milestones"
+    __table_args__ = (UniqueConstraint("user_id", "cycle_number", "milestone_number"),)
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(ForeignKey("pilot_users.id"), nullable=False, index=True)
+    cycle_number = Column(Integer, nullable=False)
+    milestone_number = Column(Integer, nullable=False)
+    points_threshold = Column(Integer, nullable=False)
+    cashback_cents = Column(Integer, nullable=False)
+    reached_at = Column(DateTime(timezone=True), nullable=False)
+    recorded_at = Column(DateTime(timezone=True), nullable=False)
+    source_request_id = Column(String(36), nullable=False)
+    source_event_type = Column(String(6), nullable=False)
+    reconstructed = Column(Boolean, nullable=False)
+
+
+class PilotAccountResetEvent(Base):
+    """Successful account resets; no foreign key to activity that will be deleted."""
+    __tablename__ = "pilot_account_resets"
+    __table_args__ = (
+        UniqueConstraint("user_id", "reset_number"),
+        UniqueConstraint("user_id", "request_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(ForeignKey("pilot_users.id"), nullable=False, index=True)
+    reset_number = Column(Integer, nullable=False)
+    request_id = Column(String(36))
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    points_before_reset = Column(Integer, nullable=False)
