@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
-from pilot_surveys import SurveyAnswers, SurveyView, activate_usage_survey, pending_survey, survey_questions, survey_view
+from pilot_surveys import SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, survey_questions, survey_view
 from pilot_preferences import preference_scores
 from pilot_price_progress import price_search_snapshot, run_price_search
 from database import Base, SessionLocal, engine
@@ -397,16 +397,6 @@ def record_pack_event(db, user, request_id, language, *, refill, defer_oracle=Fa
             )
             points_earned = USAGE_POINTS
         db.add(pack_event)
-        if refill:
-            survey = db.scalar(select(PilotRefillSurvey).where(
-                PilotRefillSurvey.user_id == user.id,
-                PilotRefillSurvey.refill_request_id == request_id,
-            ))
-            if survey is None:
-                db.add(PilotRefillSurvey(
-                    id=str(uuid4()), user_id=user.id, refill_request_id=request_id,
-                    refilled_at=now, language=language, version=1,
-                ))
         db.flush()
         result = pack_status(db, pack, now, language)
         if usage_context is not None:
@@ -701,7 +691,11 @@ def submit_survey(
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
 ):
+    get_pack(db, user, lock=True)
     survey = get_survey(db, user.id, survey_id, lock=True)
+    active = current_survey(db, user.id)
+    if active is None or active.id != survey.id:
+        raise HTTPException(409, "This survey is no longer active. Refresh the survey tab.")
     values = answers.model_dump()
     if survey.submitted_at is not None:
         if any(getattr(survey, name) != value for name, value in values.items()):

@@ -1,4 +1,4 @@
-"""Persistent survey invitations and answers for each pilot refill."""
+"""One survey response per account reset, with persistent answer history."""
 from datetime import datetime
 from typing import Literal
 from uuid import UUID, uuid4
@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from models import PilotRefillSurvey, PilotUsageEvent, PilotUsageSurveyTrigger
+from models import PilotRefillSurvey, PilotUsageEvent, PilotUsageSurveyTrigger, PilotSurveyCycle
 
 SURVEY_QUESTIONS = {
     "en": (
@@ -71,23 +71,36 @@ def survey_view(survey, db):
     )
 
 
-def pending_survey(db, user_id):
-    return db.scalar(select(PilotRefillSurvey).where(
-        PilotRefillSurvey.user_id == user_id,
+def current_survey(db, user_id):
+    cycle = db.get(PilotSurveyCycle, user_id)
+    query = select(PilotRefillSurvey).where(PilotRefillSurvey.user_id == user_id)
+    if cycle is not None:
+        query = query.where(PilotRefillSurvey.refilled_at >= cycle.started_at)
+    # Earlier releases may have created several invitations. A submitted response
+    # completes the cycle; otherwise use its oldest pending invitation.
+    return db.scalar(query.order_by(
         PilotRefillSurvey.submitted_at.is_(None),
-    ).order_by(PilotRefillSurvey.refilled_at, PilotRefillSurvey.id).limit(1))
+        PilotRefillSurvey.refilled_at, PilotRefillSurvey.id,
+    ).limit(1))
+
+
+def pending_survey(db, user_id):
+    survey = current_survey(db, user_id)
+    return survey if survey is not None and survey.submitted_at is None else None
 
 
 def activate_usage_survey(db, pack, language):
     """Activate once after any recorded use; callers hold the pack lock."""
-    existing = db.scalar(select(PilotRefillSurvey.id).where(
-        PilotRefillSurvey.user_id == pack.user_id,
-    ).limit(1))
+    existing = current_survey(db, pack.user_id)
     if existing is not None:
         return
-    first_use = db.scalar(select(PilotUsageEvent).where(
-        PilotUsageEvent.pack_id == pack.id,
-    ).order_by(PilotUsageEvent.occurred_at, PilotUsageEvent.id).limit(1))
+    cycle = db.get(PilotSurveyCycle, pack.user_id)
+    query = select(PilotUsageEvent).where(PilotUsageEvent.pack_id == pack.id)
+    if cycle is not None:
+        query = query.where(PilotUsageEvent.occurred_at >= cycle.started_at)
+    first_use = db.scalar(query.order_by(
+        PilotUsageEvent.occurred_at, PilotUsageEvent.id,
+    ).limit(1))
     if first_use is None:
         return
     # Existing storage column names are retained for database compatibility.

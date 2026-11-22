@@ -203,11 +203,11 @@ on retries. A full account reset clears both reward progress and earned cashback
 
 ### Usage and refill surveys in Primio
 
-After a successful refill, check `survey_required`, `survey_id`, and
+After the first recorded usage following enrollment or reset, check `survey_required`, `survey_id`, and
 `survey_url` in the pack response. The same fields on `GET /pilot/pack`
-recover pending surveys after restart. Each successful refill creates one
-survey invitation. Request retries reuse it. Older pending surveys are shown
-first. The first recorded usage also activates a survey if the account has no survey history.\nLater usage taps and retries create no extra survey.
+recover pending surveys after restart. Each account can submit one survey per reset. Request retries reuse its
+survey invitation. Older pending surveys are shown
+first. The first recorded usage after enrollment or reset activates the survey.\nLater usage taps and retries create no extra survey.
 
 GET `survey_url` with the participant's bearer token to obtain the four
 localized questions. Submit answers with POST to that same URL:
@@ -251,10 +251,9 @@ preview; the first recorded use activates the initial survey, and a recorded\nre
 after submission to show the next pending survey or a completion state.
 
 
-The Surveys tab becomes submittable after one recorded use. Existing participants
-with recorded usage and no survey history are activated on their next pack-status
-or survey-questions request. Completed surveys survive reset, so reset and later
-usage do not create another first-use survey. Each recorded refill still creates
-its survey. Survey details and history now include `trigger` (`usage` or `refill`),
-`trigger_request_id`, and `triggered_at`. The older `refill_request_id` and
-`refilled_at` fields are null for usage-triggered surveys.
+The Surveys tab becomes submittable after one recorded use in the current
+account-reset cycle. Once submitted, further usage and refills do not activate
+another survey. The existing password-protected `POST /pilot/auth/reset`
+starts a new survey cycle along with the activity reset. One subsequent use
+activates a new survey. Earlier answers remain in survey history and in the
+database. POSTing to a survey from an earlier cycle returns 409.

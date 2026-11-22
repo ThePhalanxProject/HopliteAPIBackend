@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from consumption import _to_utc
 from models import (
     PilotBurstRefillAlert, PilotLogin, PilotOfferPreference, PilotPriceSearch, PilotRefillAlert,
-    PilotRefillEvent, PilotRefillOracle, PilotSession, PilotUsageEvent,
+    PilotRefillEvent, PilotRefillOracle, PilotSession, PilotSurveyCycle, PilotUsageEvent,
     PilotUsageOracle, PilotUser,
 )
 from pilot import PackStatus, bearer, get_db, get_pack, message_language, pack_status, participant, token_digest
@@ -142,6 +142,7 @@ def reset_account(
         db.execute(delete(model).where(model.pack_id == pack.id))
     db.execute(delete(PilotOfferPreference).where(PilotOfferPreference.user_id == user.id))
     db.execute(delete(PilotPriceSearch).where(PilotPriceSearch.user_id == user.id))
+    db.merge(PilotSurveyCycle(user_id=user.id, started_at=now))
     pack.started_at = None
     db.flush()
     result = pack_status(db, pack, now, message_language(db, user.id))
