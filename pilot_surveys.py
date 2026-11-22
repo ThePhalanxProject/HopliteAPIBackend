@@ -7,11 +7,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from pilot_language import account_language
-from models import PilotRefillSurvey, PilotUsageEvent, PilotUsageSurveyTrigger, PilotSurveyCycle, PilotSurveyAdditionalAnswers
+from models import PilotRefillSurvey, PilotUsageEvent, PilotUsageSurveyTrigger, PilotSurveyCycle, PilotSurveyAdditionalAnswers, PilotSurveyAnswers
 
-SURVEY_VERSION = 2
+SURVEY_VERSION = 3
 
-SURVEY_QUESTIONS = {
+LEGACY_SURVEY_QUESTIONS = {
     "en": (
         "Did you enjoy the application?",
         "Would you use it if we added other features and connected it to your product?",
@@ -31,6 +31,26 @@ SURVEY_QUESTIONS = {
 }
 
 
+SURVEY_QUESTIONS = {
+    "en": (
+        "Did you enjoy the application?",
+        "Did you find the price comparison beneficial?",
+        "Would you like to buy a device that reads directly the amount of the product without you pressing the I used it button?",
+        "Would you be prepared to pay between 20€ to 30€ for this device?",
+        "Do you agree to share your usage and demographic data anonymously?",
+        "Any other comments or feedbacks you want to tell us?",
+    ),
+    "fr": (
+        "Avez-vous apprécié l’application ?",
+        "Avez-vous trouvé la comparaison des prix utile ?",
+        "Souhaiteriez-vous acheter un appareil qui mesure directement la quantité de produit sans que vous ayez à appuyer sur le bouton « Je l’ai utilisé » ?",
+        "Seriez-vous prêt(e) à payer entre 20 € et 30 € pour cet appareil ?",
+        "Acceptez-vous de partager anonymement vos données d’utilisation et vos données démographiques ?",
+        "Avez-vous d’autres commentaires ou suggestions à nous faire ?",
+    ),
+}
+
+
 class LegacySurveyAnswers(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -40,9 +60,20 @@ class LegacySurveyAnswers(BaseModel):
     experience_feedback: str = Field(min_length=1, max_length=2000, pattern=r"\S")
 
 
-class SurveyAnswers(LegacySurveyAnswers):
+class VersionTwoSurveyAnswers(LegacySurveyAnswers):
     share_anonymous_usage_data: bool = Field(strict=True)
     would_pay_for_device: bool = Field(strict=True)
+
+
+class SurveyAnswers(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enjoyed_application: bool = Field(strict=True)
+    price_comparison_beneficial: bool = Field(strict=True)
+    would_buy_automatic_device: bool = Field(strict=True)
+    would_pay_for_device: bool = Field(strict=True)
+    share_anonymous_usage_and_demographic_data: bool = Field(strict=True)
+    comments: str = Field(min_length=1, max_length=2000, pattern=r"\S")
 
 
 class SurveyView(BaseModel):
@@ -56,39 +87,45 @@ class SurveyView(BaseModel):
     language: Literal["en", "fr"]
     submitted_at: datetime | None
     questions: list[dict]
-    answers: SurveyAnswers | LegacySurveyAnswers | None
+    answers: SurveyAnswers | VersionTwoSurveyAnswers | LegacySurveyAnswers | None
 
 
 def survey_questions(language, version=SURVEY_VERSION):
-    answer_names = tuple((LegacySurveyAnswers if version == 1 else SurveyAnswers).model_fields)
-    return [
-        {"id": name, "text": text, "answer_type": "text" if name == "experience_feedback" else "yes_no",
-         **({"max_length": 2000} if name == "experience_feedback" else {})}
-        for index, (name, text) in enumerate(zip(answer_names, SURVEY_QUESTIONS[language]))
-    ]
+    answer_model = {1: LegacySurveyAnswers, 2: VersionTwoSurveyAnswers, 3: SurveyAnswers}[version]
+    texts = (SURVEY_QUESTIONS if version == SURVEY_VERSION else LEGACY_SURVEY_QUESTIONS)[language]
+    labels = ("Oui", "Non") if language == "fr" else ("Yes", "No")
+    questions = []
+    for position, (name, text) in enumerate(zip(answer_model.model_fields, texts), start=1):
+        is_text = name in ("experience_feedback", "comments")
+        questions.append({
+            "id": name, "position": position, "text": text,
+            "answer_type": "text" if is_text else "yes_no", "required": True,
+            **({"max_length": 2000} if is_text else {"options": [
+                {"value": True, "label": labels[0]},
+                {"value": False, "label": labels[1]},
+            ]}),
+        })
+    return questions
 
 
 def saved_survey_answers(survey, db):
     if survey.submitted_at is None:
         return None
+    if survey.version == SURVEY_VERSION:
+        row = db.get(PilotSurveyAnswers, survey.id)
+        return SurveyAnswers(**{name: getattr(row, name) for name in SurveyAnswers.model_fields})
     values = {name: getattr(survey, name) for name in LegacySurveyAnswers.model_fields}
     if survey.version == 1:
         return LegacySurveyAnswers(**values)
     extra = db.get(PilotSurveyAdditionalAnswers, survey.id)
-    return SurveyAnswers(**values, **{
-        name: getattr(extra, name) for name in SurveyAnswers.model_fields
-        if name not in LegacySurveyAnswers.model_fields
-    })
+    return VersionTwoSurveyAnswers(**values,
+        share_anonymous_usage_data=extra.share_anonymous_usage_data,
+        would_pay_for_device=extra.would_pay_for_device,
+    )
 
 
 def save_survey_answers(survey, answers, db):
-    for name in LegacySurveyAnswers.model_fields:
-        setattr(survey, name, getattr(answers, name))
-    db.add(PilotSurveyAdditionalAnswers(
-        survey_id=survey.id,
-        share_anonymous_usage_data=answers.share_anonymous_usage_data,
-        would_pay_for_device=answers.would_pay_for_device,
-    ))
+    db.add(PilotSurveyAnswers(survey_id=survey.id, **answers.model_dump()))
     survey.version = SURVEY_VERSION
     db.flush()
 

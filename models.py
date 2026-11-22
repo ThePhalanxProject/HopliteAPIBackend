@@ -188,3 +188,16 @@ class PilotSurveyCycle(Base):
 
     user_id = Column(ForeignKey("pilot_users.id"), primary_key=True)
     started_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class PilotSurveyAnswers(Base):
+    """All six answers to the revised survey, linked to its user through survey_id."""
+    __tablename__ = "pilot_survey_answers"
+
+    survey_id = Column(ForeignKey("pilot_refill_surveys.id"), primary_key=True)
+    enjoyed_application = Column(Boolean, nullable=False)
+    price_comparison_beneficial = Column(Boolean, nullable=False)
+    would_buy_automatic_device = Column(Boolean, nullable=False)
+    would_pay_for_device = Column(Boolean, nullable=False)
+    share_anonymous_usage_and_demographic_data = Column(Boolean, nullable=False)
+    comments = Column(Text, nullable=False)

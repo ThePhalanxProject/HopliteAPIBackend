@@ -201,89 +201,97 @@ points earns €1 and surplus points carry forward. Reuse the event request UUID
 on retries. A full account reset clears both reward progress and earned cashback.
 
 
-### Usage and refill surveys in Primio
+### Survey version 3 in Primio
 
-After the first recorded usage following enrollment or reset, check `survey_required`, `survey_id`, and
-`survey_url` in the pack response. The same fields on `GET /pilot/pack`
-recover pending surveys after restart. Each account can submit one survey per reset. Request retries reuse its
-survey invitation. Older pending surveys are shown
-first. The first recorded usage after enrollment or reset activates the survey.
-Later usage taps and retries create no extra survey.
+On each entry to the Surveys tab, GET `/pilot/surveys/questions` with the signed-in
+user's bearer token. The response has `version: 3`, `question_count: 6`, `language`,
+`questions`, `can_submit`, `survey_id`, and `survey_url`.
+Render each item separately in `position` order using its `text` and `answer_type`.
+Each question has a unique `id`. Keep separate answer state keyed by that ID;
+never bind two Yes/No controls to the same boolean. Each Yes/No item supplies
+localized `options` labels with JSON boolean values. Both `false` and `true`
+are valid answers; an unselected answer must stay distinct from `false`.
+The saved account language controls English/French text.
 
-GET `survey_url` with the participant's bearer token to obtain the six
-localized questions (survey version 2). Submit answers with POST to that same URL:
+| Position | Answer ID | Question (English) | Type |
+| --- | --- | --- | --- |
+| 1 | `enjoyed_application` | Did you enjoy the application? | Yes/No |
+| 2 | `price_comparison_beneficial` | Did you find the price comparison beneficial? | Yes/No |
+| 3 | `would_buy_automatic_device` | Would you like to buy a device that reads directly the amount of the product without you pressing the I used it button? | Yes/No |
+| 4 | `would_pay_for_device` | Would you be prepared to pay between 20€ to 30€ for this device? | Yes/No |
+| 5 | `share_anonymous_usage_and_demographic_data` | Do you agree to share your usage and demographic data anonymously? | Yes/No |
+| 6 | `comments` | Any other comments or feedbacks you want to tell us? | Text, max 2000 characters |
+
+If `can_submit` is true, POST these six fields to the returned `survey_url`:
 
 ```json
 {
   "enjoyed_application": true,
-  "would_use_connected_product": true,
-  "found_useful": false,
-  "experience_feedback": "The experience would be better if...",
-  "share_anonymous_usage_data": false,
-  "would_pay_for_device": true
+  "price_comparison_beneficial": false,
+  "would_buy_automatic_device": true,
+  "would_pay_for_device": false,
+  "share_anonymous_usage_and_demographic_data": true,
+  "comments": "Please add more products."
 }
 ```
 
-All six answers are required. Questions 1–3 and 5–6 are strict JSON booleans
-displayed as Yes/No. Question 4 is nonblank text of at most 2000 characters. On success,
-refresh pack status to show survey completion. An identical submission retry
-returns the saved answers; changing a completed survey returns 409.
-GET `/pilot/surveys?limit=100&offset=0` returns the signed-in user's survey
-history. Survey records, timestamps and answers survive the account reset.
+All six fields are required. The first five accept strict JSON booleans. Comments
+must contain nonblank text of at most 2000 characters. Questions 3 and 4 are
+independent: interest in a device does not imply acceptance of its price.
+Question 5 explicitly covers usage AND demographic data; earlier usage-only
+answers are never reused as consent for this revised question.
 
-Administrators can query the database by participant or registered email:
+After the first recorded usage following enrollment or account reset, the pack
+response and GET `/pilot/pack` expose `survey_required`, `survey_id`, and
+`survey_url`. Usage retries reuse the invitation. After submission, later usage
+and refills do not activate another survey. Refresh the questions endpoint to
+show completion. An identical submission retry returns the saved answers;
+changing a completed survey returns 409. Another user's survey returns 404.
+
+GET `/pilot/surveys?limit=100&offset=0` returns the signed-in user's history.
+GET `/pilot/surveys/{survey_id}` returns an individual invitation or saved response.
+Previously submitted version-1 and version-2 responses retain their original
+question text, meanings, and answers. Pending invitations expose version 3.
+Use `/pilot/surveys/questions` for the current question list, rather than deriving
+it from historical answers. Updating the question definitions does not reopen
+completed surveys. The password-protected POST `/pilot/auth/reset` starts a new
+cycle; the first subsequent usage enables a new survey. All previous answers
+remain in history, and posting to a survey from an earlier cycle returns 409.
+
+### Survey database inspection
+
+New version-3 submissions store ALL SIX answers in `pilot_survey_answers`, linked
+through `survey_id` to `pilot_refill_surveys` and its user. The original four
+answer columns and the version-2 extra-answer table remain for historical data;
+new questions are not mapped onto old answers. Application startup automatically
+creates the new table, with no alteration or removal of existing columns.
+Account activity resets preserve this table with survey history.
+The questions themselves are defined by version in `pilot_surveys.py`.
+
+To see the six current answer columns in psql:
 
 ```sql
-SELECT u.participant_code, l.email, s.*,
-       a.share_anonymous_usage_data, a.would_pay_for_device
+\d pilot_survey_answers
+```
+
+To retrieve a participant's version-3 answers (change the participant code):
+
+```sql
+SELECT u.participant_code, l.email, s.id AS survey_id, s.version,
+       s.submitted_at, a.enjoyed_application, a.price_comparison_beneficial,
+       a.would_buy_automatic_device, a.would_pay_for_device,
+       a.share_anonymous_usage_and_demographic_data, a.comments
 FROM pilot_refill_surveys s
-LEFT JOIN pilot_survey_additional_answers a ON a.survey_id = s.id
 JOIN pilot_users u ON u.id = s.user_id
 LEFT JOIN pilot_logins l ON l.user_id = u.id
+JOIN pilot_survey_answers a ON a.survey_id = s.id
 WHERE u.participant_code = 'SMOKE-B'
 ORDER BY s.refilled_at;
 ```
 
-
-Version 2 appends these questions after the existing four, with English/French
-text supplied by the backend using the saved account language:
-
-- `share_anonymous_usage_data`: “Are you happy to share your usage data anonymously to refine your search?”
-- `would_pay_for_device`: “Are you prepared to pay between 20€ and 30€ for a device that removes your need to press the refill button each time and ensures that the product never runs out?”
-
-Previously submitted version-1 responses retain their four questions and answers;
-missing answers to the new questions are never inferred. Pending invitations
-expose version 2 and require all six answers. Updating the survey does not reopen
-completed surveys. Identical version-1 submission retries remain supported.
-The two additional answers are stored in `pilot_survey_additional_answers`,
-linked to the original survey and its user. Application startup creates this
-new table automatically; no alteration of existing survey columns is needed.
-Both new answers survive account activity resets with survey history. This
-survey records the user's answer; it does not itself start sharing data or
-charge for a device.
-
 For regression checks, install `httpx` alongside the application dependencies
 and run `python -m unittest discover -s tests -v`. Tests use a temporary SQLite
 database and do not connect to the deployed database.
-
-
-### Opening the Surveys tab
-
-On each tab entry, call authenticated GET `/pilot/surveys/questions`.
-The response includes `questions`, `language`, `version`, `can_submit`,
-`survey_id`, and `survey_url`. Render the returned questions directly.
-If `can_submit` is true, POST all six answers to `survey_url` using the
-existing survey submission format. If false, the questions are available for
-preview; the first recorded use following enrollment or account reset activates
-the survey. Refresh this endpoint after submission to show completion.
-
-
-The Surveys tab becomes submittable after one recorded use in the current
-account-reset cycle. Once submitted, further usage and refills do not activate
-another survey. The existing password-protected `POST /pilot/auth/reset`
-starts a new survey cycle along with the activity reset. One subsequent use
-activates a new survey. Earlier answers remain in survey history and in the
-database. POSTing to a survey from an earlier cycle returns 409.
 
 
 ### Account language in Primio

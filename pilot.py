@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from consumption import _to_utc
 from pilot_oracle import OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
-from pilot_surveys import SURVEY_VERSION, LegacySurveyAnswers, SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, save_survey_answers, saved_survey_answers, survey_questions, survey_view
+from pilot_surveys import SURVEY_VERSION, LegacySurveyAnswers, VersionTwoSurveyAnswers, SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, save_survey_answers, saved_survey_answers, survey_questions, survey_view
 from pilot_language import account_language
 from pilot_preferences import preference_scores
 from pilot_price_progress import price_search_snapshot, run_price_search, translate_price_search
@@ -686,6 +686,7 @@ def read_survey_questions(
     db.commit()
     return {
         "version": SURVEY_VERSION,
+        "question_count": len(SurveyAnswers.model_fields),
         "language": language,
         "questions": survey_questions(language),
         "survey_id": survey.id if survey else None,
@@ -706,7 +707,7 @@ def read_survey(
 @router.post("/surveys/{survey_id}", response_model=SurveyView)
 def submit_survey(
     survey_id: UUID,
-    answers: SurveyAnswers | LegacySurveyAnswers,
+    answers: SurveyAnswers | VersionTwoSurveyAnswers | LegacySurveyAnswers,
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
 ):
