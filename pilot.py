@@ -16,6 +16,7 @@ from consumption import _to_utc
 from pilot_oracle import PILOT_LANGUAGE_POLICY_VERSION, OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
 from pilot_surveys import SURVEY_VERSION, LegacySurveyAnswers, VersionTwoSurveyAnswers, SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, save_survey_answers, saved_survey_answers, survey_is_eligible, survey_questions, survey_view
 from pilot_language import account_language
+from pilot_rewards import ensure_reward_account, sync_reward_account
 from pilot_account_history import USAGE_POINTS, REFILL_POINTS, POINTS_PER_EURO, sync_cashback_history
 from pilot_preferences import preference_scores
 from pilot_price_progress import price_search_snapshot, run_price_search, translate_price_search
@@ -162,6 +163,8 @@ def get_pack(db: Session, user: PilotUser, *, lock: bool = False) -> PilotPack:
     pack = db.scalar(query.with_for_update() if lock else query)
     if pack is None:
         raise HTTPException(404, "No pilot pack assigned")
+    if lock:
+        ensure_reward_account(db, user.id)
     return pack
 
 
@@ -730,6 +733,8 @@ def submit_survey(
         raise HTTPException(422, "Answer all six survey questions")
     save_survey_answers(survey, answers, db)
     survey.submitted_at = datetime.now(timezone.utc)
+    db.flush()
+    sync_reward_account(db, user.id)
     result = survey_view(survey, db)
     db.commit()
     return result
@@ -741,6 +746,7 @@ def provision_participant(db: Session, participant_code: str) -> str:
     db.add(user)
     db.flush()
     db.add(PilotPack(user_id=user.id))
+    ensure_reward_account(db, user.id)
     db.commit()
     return token
 

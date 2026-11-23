@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Boolean, Integer, Float, String, DateTime, Text, JSON, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Boolean, CheckConstraint, Integer, Float, String, DateTime, Text, JSON, ForeignKey, UniqueConstraint
 from datetime import datetime
 
 from database import Base
@@ -235,3 +235,35 @@ class PilotAccountResetEvent(Base):
     request_id = Column(String(36))
     occurred_at = Column(DateTime(timezone=True), nullable=False)
     points_before_reset = Column(Integer, nullable=False)
+
+
+class PilotRewardAccount(Base):
+    """Persistent earned euro balance, held in integer cents and never reset by activity reset."""
+    __tablename__ = "pilot_reward_accounts"
+    __table_args__ = (CheckConstraint("balance_cents >= 0"),)
+
+    user_id = Column(ForeignKey("pilot_users.id"), primary_key=True)
+    balance_cents = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class PilotRewardCredit(Base):
+    """One auditable credit per point milestone or submitted survey."""
+    __tablename__ = "pilot_reward_credits"
+    __table_args__ = (
+        CheckConstraint("amount_cents > 0"),
+        CheckConstraint(
+            "(reward_type = 'points' AND milestone_id IS NOT NULL AND survey_id IS NULL) OR "
+            "(reward_type = 'survey' AND survey_id IS NOT NULL AND milestone_id IS NULL)"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(ForeignKey("pilot_reward_accounts.user_id"), nullable=False, index=True)
+    reward_type = Column(String(6), nullable=False)
+    milestone_id = Column(ForeignKey("pilot_cashback_milestones.id"), unique=True)
+    survey_id = Column(ForeignKey("pilot_refill_surveys.id"), unique=True)
+    amount_cents = Column(Integer, nullable=False)
+    earned_at = Column(DateTime(timezone=True), nullable=False)
+    credited_at = Column(DateTime(timezone=True), nullable=False)

@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import SessionLocal, Base, engine
 from pilot_db_flags import create_survey_flags_view
+from pilot_rewards import initialize_reward_accounts
 from schemas import Measurement
 from schemas_prediction import ConsumptionResponse
 import crud
@@ -30,6 +31,7 @@ app.add_middleware(
 
 Base.metadata.create_all(bind=engine)
 create_survey_flags_view(engine)
+initialize_reward_accounts(engine)
 app.include_router(pilot_router)
 app.include_router(pilot_auth_router)
 

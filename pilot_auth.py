@@ -20,6 +20,7 @@ from models import (
 )
 from pilot_language import header_language
 from pilot_account_history import account_reset_count
+from pilot_rewards import ensure_reward_account
 from pilot import PackStatus, bearer, get_db, get_pack, message_language, pack_status, participant, token_digest
 
 router = APIRouter(prefix="/pilot/auth", tags=["pilot"])
@@ -79,6 +80,7 @@ def enroll(data: EnrollmentRequest, request: Request, db: Session = Depends(get_
     db.merge(PilotMessagePreference(user_id=user.id, language=request.state.language))
     try:
         db.flush()
+        ensure_reward_account(db, user.id)
         result = create_session(db, account, datetime.now(timezone.utc))
         db.commit()
     except IntegrityError:

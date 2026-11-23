@@ -476,3 +476,60 @@ ORDER BY participant_code;
 
 To inspect only one participant, add `WHERE participant_code = 'SMOKE-E'`
 before the ORDER BY clause.
+
+### Database-only per-user euro rewards account
+
+Each participant has one `pilot_reward_accounts` row, keyed by `user_id`.
+`balance_cents` is the persistent earned euro balance in integer cents.
+`pilot_reward_credits` records each addition, its source and its timestamps:
+
+- Each new 100-point milestone adds 100 cents (€1). Refills continue point
+  progress and may cross a milestone; they do not reset it.
+- Each valid, completed survey adds 500 cents (€5). The seven-use submission
+  gate and one-submission-per-reset rule still apply.
+- Survey/usage/refill retries do not duplicate credits. Unique source keys,
+  user/account row locks, and a single source/credit/balance transaction protect
+  against double awards and partial writes.
+
+A user completing one survey and one 100-point milestone has a 600-cent (€6)
+account balance. Activity resets clear current usage/points as before, while
+preserving earned euros, credit history, milestone history and prior survey
+answers. A newly eligible survey after reset is a new valid submission and can
+earn its own €5 bonus. These records track rewards earned, not payments or
+withdrawals; no payment or redemption integration is added.
+
+The balance and credit history are database-only. No new account-balance API
+fields, endpoint, Primio screen or Oracle payload fields are added. Existing
+current-cycle cashback response fields retain their previous points-only meaning.
+
+Startup automatically creates the two new tables and initializes existing users.
+It recovers any retained 100-point milestones and credits all recorded submitted
+surveys (including historical versions), once each. Previously recorded milestone
+amounts retain their original value. Repeated startup/backfill never awards the
+same source twice. Activity erased before permanent milestone tracking existed
+cannot be recovered. New provisioning, enrollment and first locked pack access
+ensure a zero-balance account also exists for new or older-tool participants.
+No existing columns are altered. Deployment/restart is needed to apply startup
+initialization to the server database.
+
+To see per-user balances in psql:
+
+```sql
+SELECT u.participant_code, l.email, a.balance_cents,
+       a.balance_cents / 100.0 AS balance_eur, a.updated_at
+FROM pilot_reward_accounts a
+JOIN pilot_users u ON u.id = a.user_id
+LEFT JOIN pilot_logins l ON l.user_id = u.id
+ORDER BY u.participant_code;
+```
+
+To inspect the additions for one account:
+
+```sql
+SELECT u.participant_code, c.reward_type, c.amount_cents / 100.0 AS credited_eur,
+       c.earned_at, c.credited_at, c.milestone_id, c.survey_id
+FROM pilot_reward_credits c
+JOIN pilot_users u ON u.id = c.user_id
+WHERE u.participant_code = 'SMOKE-E'
+ORDER BY c.id;
+```
