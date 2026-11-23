@@ -242,7 +242,7 @@ independent: interest in a device does not imply acceptance of its price.
 Question 5 explicitly covers usage AND demographic data; earlier usage-only
 answers are never reused as consent for this revised question.
 
-After the seventh distinct recorded usage following enrollment or account reset, the pack
+After a recorded refill or the seventh distinct usage following enrollment or account reset, the pack
 response and GET `/pilot/pack` expose `survey_required`, `survey_id`, and
 `survey_url`. Usage retries reuse the invitation. After submission, later usage
 and refills do not activate another survey. Refresh the questions endpoint to
@@ -256,7 +256,7 @@ question text, meanings, and answers. Pending invitations expose version 3.
 Use `/pilot/surveys/questions` for the current question list, rather than deriving
 it from historical answers. Updating the question definitions does not reopen
 completed surveys. The password-protected POST `/pilot/auth/reset` starts a new
-cycle; seven subsequent usages enable a new survey. All previous answers
+cycle; a new refill or seven subsequent usages enable a new survey. All previous answers
 remain in history, and posting to a survey from an earlier cycle returns 409.
 
 ### Survey database inspection
@@ -431,24 +431,28 @@ https://serpapi.com/amazon-domains
 https://serpapi.com/amazon-organic-results
 
 
-### Seven-use survey gate and database-only completion flags
+### Refill or seven-use survey gate and database-only completion flags
 
-A survey becomes submittable after seven distinct recorded usage events in the
-current account-reset cycle. Uses accumulate across refills. Retried requests
-and refill events do not count as additional uses. Before the seventh use,
-GET `/pilot/surveys/questions` returns `can_submit: false`, `survey_id: null`
-and `survey_url: null`; the six questions remain available for preview.
-Pack responses keep `survey_required: false`. The seventh use activates the
-invitation. Pending invitations created by an older release are also blocked
-until the same seven-use threshold is met, including direct POST attempts.
-Early POST attempts return localized HTTP 409. Previously submitted responses
-are retained, and identical retries of a completed response remain supported.
-After an account reset, seven new uses are required for another submission.
+A survey becomes submittable after any accepted refill OR seven distinct recorded
+usage events in the current account-reset cycle, whichever happens first.
+Before either event, GET `/pilot/surveys/questions` returns `can_submit: false`,
+`survey_id: null` and `survey_url: null`; the six questions remain available for
+preview. Pack responses keep `survey_required: false` until eligibility is met.
+A refill response immediately includes the pending survey flag, ID and URL,
+even with fewer than seven uses. Its survey details expose `trigger: "refill"`
+and the actual refill request ID and timestamp. Seventh-use invitations expose
+`trigger: "usage"`. Retries reuse the invitation; rejected refills do not unlock it.
+Pending invitations from older releases use the same eligibility check, including
+direct POST attempts, which return localized HTTP 409 when not yet eligible.
 
-Primio should continue using `can_submit` rather than a locally calculated
-threshold. Any locally written explanation saying one use is required should
-be updated to seven uses. There are no new survey-completion fields in API
-responses and no survey-status API endpoint.
+Only one survey can be submitted per account-reset cycle. Later refills do not
+reopen a completed survey. An account reset allows a new survey after another
+refill or seven new uses; all earlier answers remain in history. Identical
+submission retries return the saved answers without adding rewards again.
+
+Primio should use `can_submit` and `survey_required` from the backend. Any local
+explanation should say "after a refill or seven uses". There are no new
+survey-completion fields in API responses and no survey-status API endpoint.
 
 The database view `pilot_user_survey_flags` gives administrators:
 
@@ -464,7 +468,7 @@ There are no duplicate mutable flags to refresh or backfill. Pending surveys do
 not count as completed, and versions 1, 2 and 3 all count once submitted.
 The view is created at API startup after the tables, using
 `sql/pilot_user_survey_flags.sql`. It can also be applied directly with psql
-without deploying API code. The seven-use API gate requires the code release.
+without deploying API code. The refill-or-seven-use API gate requires the code release.
 No survey answers, points, token values or account-reset history are changed.
 
 ```sql
@@ -485,7 +489,7 @@ Each participant has one `pilot_reward_accounts` row, keyed by `user_id`.
 
 - Each new 100-point milestone adds 100 cents (€1). Refills continue point
   progress and may cross a milestone; they do not reset it.
-- Each valid, completed survey adds 500 cents (€5). The seven-use submission
+- Each valid, completed survey adds 500 cents (€5). The refill-or-seven-use submission
   gate and one-submission-per-reset rule still apply.
 - Survey/usage/refill retries do not duplicate credits. Unique source keys,
   user/account row locks, and a single source/credit/balance transaction protect

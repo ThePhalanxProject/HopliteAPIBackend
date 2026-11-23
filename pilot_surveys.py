@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 
 from pilot_language import account_language
-from models import PilotPack, PilotRefillSurvey, PilotUsageEvent, PilotUsageSurveyTrigger, PilotSurveyCycle, PilotSurveyAdditionalAnswers, PilotSurveyAnswers
+from models import PilotPack, PilotRefillEvent, PilotRefillSurvey, PilotUsageEvent, PilotUsageSurveyTrigger, PilotSurveyCycle, PilotSurveyAdditionalAnswers, PilotSurveyAnswers
 
 SURVEY_VERSION = 3
 SURVEY_REQUIRED_USES = 7
@@ -171,8 +171,21 @@ def survey_usage_count(db, user_id):
     return db.scalar(query)
 
 
+def first_cycle_refill(db, user_id):
+    cycle = db.get(PilotSurveyCycle, user_id)
+    query = select(PilotRefillEvent).join(
+        PilotPack, PilotRefillEvent.pack_id == PilotPack.id,
+    ).where(PilotPack.user_id == user_id)
+    if cycle is not None:
+        query = query.where(PilotRefillEvent.occurred_at >= cycle.started_at)
+    return db.scalar(query.order_by(
+        PilotRefillEvent.occurred_at, PilotRefillEvent.id,
+    ).limit(1))
+
+
 def survey_is_eligible(db, user_id):
-    return survey_usage_count(db, user_id) >= SURVEY_REQUIRED_USES
+    return (survey_usage_count(db, user_id) >= SURVEY_REQUIRED_USES
+            or first_cycle_refill(db, user_id) is not None)
 
 
 def pending_survey(db, user_id):
@@ -183,7 +196,7 @@ def pending_survey(db, user_id):
 
 
 def activate_usage_survey(db, pack, language):
-    """Activate on the seventh use of a reset cycle; callers hold the pack lock."""
+    """Activate on a refill or seventh use; callers hold the pack lock."""
     existing = current_survey(db, pack.user_id)
     if existing is not None:
         return
@@ -194,6 +207,14 @@ def activate_usage_survey(db, pack, language):
     qualifying_use = db.scalar(query.order_by(
         PilotUsageEvent.occurred_at, PilotUsageEvent.id,
     ).offset(SURVEY_REQUIRED_USES - 1).limit(1))
+    refill = first_cycle_refill(db, pack.user_id)
+    if refill is not None and (qualifying_use is None or refill.occurred_at <= qualifying_use.occurred_at):
+        db.add(PilotRefillSurvey(
+            id=str(uuid4()), user_id=pack.user_id, refill_request_id=refill.request_id,
+            refilled_at=refill.occurred_at, version=SURVEY_VERSION, language=language,
+        ))
+        db.flush()
+        return
     if qualifying_use is None:
         return
     # Existing storage column names are retained for database compatibility.

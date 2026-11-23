@@ -13,7 +13,7 @@ from database import SessionLocal
 from models import PilotMessagePreference, PilotSession, PilotUser
 
 FRENCH_ERRORS = {
-    "Complete at least 7 uses before submitting this survey": "Enregistrez au moins 7 utilisations avant de répondre à ce questionnaire.",
+    "Complete at least 7 uses or record a refill before submitting this survey": "Enregistrez au moins 7 utilisations ou une recharge avant de répondre à ce questionnaire.",
     "Invalid pilot credential": "Session invalide ou expirée. Veuillez vous reconnecter.",
     "No pilot pack assigned": "Aucun produit pilote n’est associé à votre compte.",
     "Start the pilot pack before logging events": "Activez votre produit avant d’enregistrer une utilisation.",

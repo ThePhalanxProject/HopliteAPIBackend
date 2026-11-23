@@ -728,7 +728,7 @@ def submit_survey(
             raise HTTPException(409, "This survey has already been submitted")
         return survey_view(survey, db)
     if not survey_is_eligible(db, user.id):
-        raise HTTPException(409, "Complete at least 7 uses before submitting this survey")
+        raise HTTPException(409, "Complete at least 7 uses or record a refill before submitting this survey")
     if not isinstance(answers, SurveyAnswers):
         raise HTTPException(422, "Answer all six survey questions")
     save_survey_answers(survey, answers, db)

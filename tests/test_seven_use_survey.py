@@ -63,15 +63,54 @@ class SevenUseSurveyTests(unittest.TestCase):
             flags=db.execute(__import__('sqlalchemy').text('SELECT survey_completed,survey_ever_completed FROM pilot_user_survey_flags WHERE user_id=:id'),{'id':self.user_id}).one()
             self.assertEqual(tuple(flags),(1,1))
 
-    def test_retries_and_refills_do_not_count_as_extra_uses(self):
+    def refill(self, key=None):
+        r=self.client.post('/pilot/pack/refill?defer_oracle=true',headers=self.h,json={'request_id':key or str(uuid4())})
+        self.assertEqual(r.status_code,200,r.text)
+        return r.json()
+
+    def test_usage_retries_do_not_count_as_extra_uses(self):
         first=str(uuid4())
         self.tap(first)
         self.tap(first)
-        r=self.client.post('/pilot/pack/refill?defer_oracle=true',headers=self.h,json={'request_id':str(uuid4())})
-        self.assertEqual(r.status_code,200,r.text)
         for _ in range(5):self.tap()
         self.assertFalse(self.questions()['can_submit'])
         self.assertTrue(self.tap()['survey_required'])
+
+    def test_refill_unlocks_before_seven_uses_and_retry_reuses_invitation(self):
+        self.tap()
+        key=str(uuid4())
+        result=self.refill(key)
+        self.assertTrue(result['survey_required'])
+        self.assertEqual(self.refill(key)['survey_id'],result['survey_id'])
+        self.assertTrue(self.questions()['can_submit'])
+        detail=self.client.get(result['survey_url'],headers=self.h).json()
+        self.assertEqual(detail['trigger'],'refill')
+        self.assertEqual(detail['trigger_request_id'],key)
+        self.assertEqual(detail['refill_request_id'],key)
+        self.assertEqual(self.client.post(result['survey_url'],headers=self.h,json=surveys.NEW_ANSWERS).status_code,200)
+        self.tap()
+        self.assertFalse(self.refill()['survey_required'])
+        self.assertFalse(self.questions()['can_submit'])
+        with SessionLocal() as db:
+            self.assertEqual(db.query(PilotRefillSurvey).count(),1)
+
+    def test_refill_after_reset_unlocks_a_new_survey(self):
+        self.tap()
+        first=self.refill()
+        self.assertEqual(self.client.post(first['survey_url'],headers=self.h,json=surveys.NEW_ANSWERS).status_code,200)
+        r=self.client.post('/pilot/auth/reset',headers=self.h,json={'password':'survey-test-password'})
+        self.assertEqual(r.status_code,200,r.text)
+        self.assertFalse(self.questions()['can_submit'])
+        self.client.post('/pilot/pack/start',headers=self.h)
+        self.tap()
+        result=self.refill()
+        self.assertTrue(result['survey_required'])
+        self.assertNotEqual(result['survey_id'],first['survey_id'])
+
+    def test_rejected_refill_does_not_unlock_survey(self):
+        r=self.client.post('/pilot/pack/refill?defer_oracle=true',headers=self.h,json={'request_id':str(uuid4())})
+        self.assertEqual(r.status_code,409,r.text)
+        self.assertFalse(self.questions()['can_submit'])
 
     def test_reset_requires_seven_new_uses_and_keeps_completion_history(self):
         for _ in range(7):self.tap()
