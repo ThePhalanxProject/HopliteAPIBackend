@@ -1,6 +1,9 @@
 from datetime import datetime
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from pilot_language import localized_http_error, localized_validation_error
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import SessionLocal, Base, engine
@@ -11,8 +14,11 @@ from models import NotificationModel
 from consumption import calculate_consumption
 from agent import call_hoplite_agent, AgentError
 from pilot import router as pilot_router
+from pilot_auth import router as pilot_auth_router
 
 app = FastAPI()
+app.add_exception_handler(StarletteHTTPException, localized_http_error)
+app.add_exception_handler(RequestValidationError, localized_validation_error)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,6 +29,7 @@ app.add_middleware(
 
 Base.metadata.create_all(bind=engine)
 app.include_router(pilot_router)
+app.include_router(pilot_auth_router)
 
 
 @app.get("/health")

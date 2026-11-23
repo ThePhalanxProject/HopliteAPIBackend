@@ -2,21 +2,45 @@ from argparse import ArgumentParser
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from secrets import token_urlsafe
-from uuid import UUID
+from typing import Literal
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
-from sqlalchemy import func, select
+from pydantic import BaseModel, Field, computed_field
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from consumption import _to_utc
+from pilot_oracle import PILOT_LANGUAGE_POLICY_VERSION, OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
+from pilot_surveys import SURVEY_VERSION, LegacySurveyAnswers, VersionTwoSurveyAnswers, SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, save_survey_answers, saved_survey_answers, survey_questions, survey_view
+from pilot_language import account_language
+from pilot_account_history import USAGE_POINTS, REFILL_POINTS, POINTS_PER_EURO, sync_cashback_history
+from pilot_preferences import preference_scores
+from pilot_price_progress import price_search_snapshot, run_price_search, translate_price_search
 from database import Base, SessionLocal, engine
-from models import PilotPack, PilotUsageEvent, PilotUser
+from models import PilotBurstRefillAlert, PilotMessagePreference, PilotOfferPreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotRefillOracle, PilotRefillSurvey, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
 
-STARTING_WEIGHT_G = 1500
-DOSE_G = 65
+CAPACITY_ML = 1500
+DOSE_ML = 65
+FORECAST_WINDOWS = (
+    timedelta(hours=1), timedelta(days=1), timedelta(days=7),
+    timedelta(days=15), timedelta(days=30),
+)
+HOUR_WINDOW, DAY_WINDOW = FORECAST_WINDOWS[:2]
+COLD_START_BURST_USES = 8
+POSSIBLE_DOUBLE_USE_GAP = timedelta(seconds=30)
+REFILL_FORECAST_DAYS = 7
+REFILL_ALERT_MESSAGES = {
+    "en": "Your detergent is running low. Please refill your Hoplite.",
+    "fr": "Votre lessive est presque épuisée. Pensez à recharger votre Hoplite.",
+}
+
+BURST_REFILL_ALERT_MESSAGES = {
+    "en": "High usage brought forward your refill. Please refill your Hoplite.",
+    "fr": "Votre forte utilisation a avancé le besoin de recharge. Pensez à recharger votre Hoplite.",
+}
 
 router = APIRouter(prefix="/pilot", tags=["pilot"])
 bearer = HTTPBearer(auto_error=False)
@@ -28,13 +52,56 @@ class UsageTap(BaseModel):
 
 class PackStatus(BaseModel):
     started_at: datetime | None
-    current_weight_g: int
+    last_refill_at: datetime | None = None
+    language: Literal["en", "fr"] = "en"
+    current_volume_l: float
+    capacity_l: float
+    dose_ml: int
     full_doses_remaining: int
     sample_count: int
+    user_points: int
+    cashback_points_per_euro: int = POINTS_PER_EURO
+    cashback_earned_cents: int
+    points_to_next_cashback: int
     data_span_days: float
-    consumption_rate_g_day: float | None = None
+    consumption_rate_l_day: float | None = None
     days_remaining: float | None = None
     estimated_runout_at: datetime | None = None
+    usage_overuse: dict = Field(default_factory=dict, exclude=True)
+    survey_required: bool = False
+    survey_id: str | None = None
+    survey_url: str | None = None
+    refill_needed: bool = False
+    refill_reason: Literal["high_utilization", "normal"] | None = None
+    refill_alert_message: str | None = None
+
+    @computed_field
+    @property
+    def cashback_progress_points(self) -> int:
+        return self.user_points % self.cashback_points_per_euro
+
+    @computed_field
+    @property
+    def stock_status(self) -> Literal["not_started", "ok", "low", "urgent", "empty"]:
+        if self.started_at is None:
+            return "not_started"
+        if self.current_volume_l == 0:
+            return "empty"
+        if self.full_doses_remaining < 3 or (
+            self.days_remaining is not None and self.days_remaining <= 3
+        ):
+            return "urgent"
+        if self.refill_needed or (self.days_remaining is not None and self.days_remaining <= REFILL_FORECAST_DAYS):
+            return "low"
+        return "ok"
+
+
+class UsageResult(PackStatus):
+    points_earned: int
+    refill_recorded: bool
+    cashback_unlocked_cents: int
+    oracle: OracleMessage
+    oracle_url: str | None = None
 
 
 def get_db():
@@ -51,12 +118,43 @@ def participant(
     db: Session = Depends(get_db),
 ) -> PilotUser:
     if credentials is not None:
-        user = db.scalar(select(PilotUser).where(
-            PilotUser.token_hash == token_digest(credentials.credentials)
-        ))
+        digest = token_digest(credentials.credentials)
+        user = db.scalar(select(PilotUser).where(PilotUser.token_hash == digest))
+        if user is None:
+            user = db.scalar(select(PilotUser).join(PilotSession).where(
+                PilotSession.token_hash == digest,
+                PilotSession.expires_at > datetime.now(timezone.utc),
+            ))
         if user is not None:
             return user
     raise HTTPException(401, "Invalid pilot credential", headers={"WWW-Authenticate": "Bearer"})
+
+
+class MessagePreference(BaseModel):
+    language: Literal["en", "fr"]
+
+
+def message_language(db: Session, user_id: int) -> str:
+    return account_language(db, user_id)
+
+
+@router.get("/preferences/message-language", response_model=MessagePreference)
+def read_message_language(
+    user: PilotUser = Depends(participant), db: Session = Depends(get_db)
+):
+    return MessagePreference(language=message_language(db, user.id))
+
+
+@router.put("/preferences/message-language", response_model=MessagePreference)
+def set_message_language(
+    preference: MessagePreference,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    db.scalar(select(PilotUser.id).where(PilotUser.id == user.id).with_for_update())
+    db.merge(PilotMessagePreference(user_id=user.id, language=preference.language))
+    db.commit()
+    return preference
 
 
 def get_pack(db: Session, user: PilotUser, *, lock: bool = False) -> PilotPack:
@@ -67,39 +165,149 @@ def get_pack(db: Session, user: PilotUser, *, lock: bool = False) -> PilotPack:
     return pack
 
 
-def pack_status(db: Session, pack: PilotPack, now: datetime) -> PackStatus:
-    count, grams_used, last_use = db.execute(
+def consumption_outlook(db: Session, pack: PilotPack, now: datetime, cycle_start: datetime):
+    tracked_since = _to_utc(pack.started_at)
+    timestamp = PilotUsageEvent.occurred_at
+    cutoffs = [now - window for window in FORECAST_WINDOWS]
+    baseline_end = cutoffs[1]
+    baseline_start = max(tracked_since, baseline_end - FORECAST_WINDOWS[-1])
+    *volumes, hourly_uses, daily_uses, baseline_uses = db.execute(
         select(
-            func.count(PilotUsageEvent.id),
-            func.coalesce(func.sum(PilotUsageEvent.grams_used), 0),
-            func.max(PilotUsageEvent.occurred_at),
-        ).where(PilotUsageEvent.pack_id == pack.id)
+            *(func.coalesce(func.sum(PilotUsageEvent.volume_used_ml).filter(
+                timestamp > cutoff,
+                timestamp >= (cycle_start if index == 0 else tracked_since)
+            ), 0) for index, cutoff in enumerate(cutoffs)),
+            func.count().filter(timestamp > cutoffs[0], timestamp >= cycle_start),
+            func.count().filter(timestamp > cutoffs[1]),
+            func.count().filter(timestamp <= baseline_end),
+        ).where(
+            PilotUsageEvent.pack_id == pack.id, timestamp >= baseline_start, timestamp <= now,
+        )
     ).one()
-    remaining = STARTING_WEIGHT_G - grams_used
-    started_at = _to_utc(pack.started_at) if pack.started_at is not None else None
+
+    baseline_days = (baseline_end - baseline_start) / DAY_WINDOW
+    has_baseline = baseline_days >= 7 and baseline_uses >= 3
+    baseline_daily = baseline_uses / baseline_days if has_baseline else None
+    hourly_overuse = (
+        hourly_uses >= 3 and hourly_uses >= 2 * baseline_daily / 24
+        if has_baseline else hourly_uses >= COLD_START_BURST_USES
+    )
+    daily_overuse = has_baseline and daily_uses >= 4 and daily_uses >= 2 * baseline_daily
+    rates = [
+        volume / (window / DAY_WINDOW)
+        for window, volume in zip(FORECAST_WINDOWS[1:], volumes[1:])
+        if now - tracked_since >= window
+    ]
+    regular_rate = sum(rates) / len(rates) if rates else None
+    # A short burst should influence the forecast when there is evidence of overuse.
+    if hourly_overuse:
+        rates.append(volumes[0] / (HOUR_WINDOW / DAY_WINDOW))
+    return (
+        sum(rates) / len(rates) if rates else None,
+        regular_rate,
+        {
+            "rapid_usage": hourly_overuse,
+            "uses_in_last_hour": hourly_uses,
+            "daily_overuse": daily_overuse,
+            "uses_in_last_day": daily_uses,
+            "historical_uses_per_day": round(baseline_daily, 2) if has_baseline else None,
+        },
+    )
+
+
+def pack_status(db: Session, pack: PilotPack, now: datetime, language: str, *, milestone_request_id=None) -> PackStatus:
+    refills = select(
+        func.count(PilotRefillEvent.id).label("refill_count"),
+        func.max(PilotRefillEvent.after_usage_id).label("last_refill_usage"),
+        func.max(PilotRefillEvent.occurred_at).label("last_refill_at"),
+    ).where(PilotRefillEvent.pack_id == pack.id).cte()
+    current_cycle = PilotUsageEvent.id > func.coalesce(refills.c.last_refill_usage, 0)
+    count, volume_used_ml, last_use, usage_count, refill_count, refill_at = db.execute(
+        select(
+            func.count(PilotUsageEvent.id).filter(current_cycle),
+            func.coalesce(func.sum(PilotUsageEvent.volume_used_ml).filter(current_cycle), 0),
+            func.max(PilotUsageEvent.occurred_at).filter(current_cycle),
+            func.count(PilotUsageEvent.id),
+            refills.c.refill_count,
+            refills.c.last_refill_at,
+        ).select_from(refills).outerjoin(
+            PilotUsageEvent, PilotUsageEvent.pack_id == pack.id
+        ).group_by(refills.c.refill_count, refills.c.last_refill_at)
+    ).one()
+    remaining = CAPACITY_ML - volume_used_ml
+    points = usage_count * USAGE_POINTS + refill_count * REFILL_POINTS
+    cycle_start = refill_at or pack.started_at
+    started_at = _to_utc(cycle_start) if cycle_start is not None else None
     elapsed_days = (now - started_at).total_seconds() / 86400 if started_at else 0.0
+    sync_cashback_history(db, pack, points, now, current_request_id=milestone_request_id)
     result = PackStatus(
+        language=language,
         started_at=started_at,
-        current_weight_g=remaining,
-        full_doses_remaining=remaining // DOSE_G,
+        last_refill_at=_to_utc(refill_at) if refill_at is not None else None,
+        current_volume_l=remaining / 1000,
+        capacity_l=CAPACITY_ML / 1000,
+        dose_ml=DOSE_ML,
+        full_doses_remaining=remaining // DOSE_ML,
         sample_count=count,
+        user_points=points,
+        cashback_earned_cents=(points // POINTS_PER_EURO) * 100,
+        points_to_next_cashback=POINTS_PER_EURO - points % POINTS_PER_EURO,
         data_span_days=elapsed_days,
     )
     if remaining == 0:
         result.days_remaining = 0.0
         result.estimated_runout_at = _to_utc(last_use)
-    if count >= 2 and elapsed_days >= 2.0:
-        rate = grams_used / elapsed_days
-        result.consumption_rate_g_day = rate
+    rate = regular_rate = None
+    if started_at is not None and count:
+        rate, regular_rate, result.usage_overuse = consumption_outlook(db, pack, now, started_at)
+    if rate:
+        result.consumption_rate_l_day = rate / 1000
         if remaining > 0:
             result.days_remaining = remaining / rate
             result.estimated_runout_at = now + timedelta(days=result.days_remaining)
+    alert = db.get(PilotRefillAlert, pack.id)
+    active = alert is not None and _to_utc(alert.cycle_started_at) == started_at
+    burst_alert = db.get(PilotBurstRefillAlert, pack.id) if active else None
+    if not active and result.stock_status in {"low", "urgent", "empty"}:
+        if alert is None:
+            db.add(PilotRefillAlert(pack_id=pack.id, cycle_started_at=started_at))
+        else:
+            alert.cycle_started_at = started_at
+        if (
+            result.usage_overuse.get("rapid_usage")
+            and result.full_doses_remaining >= 3
+            and (not regular_rate or remaining / regular_rate > REFILL_FORECAST_DAYS)
+        ):
+            burst_alert = db.get(PilotBurstRefillAlert, pack.id)
+            if burst_alert is None:
+                burst_alert = PilotBurstRefillAlert(pack_id=pack.id, cycle_started_at=started_at)
+                db.add(burst_alert)
+            else:
+                burst_alert.cycle_started_at = started_at
+        active = True
+    if active:
+        result.refill_needed = True
+        burst_triggered = burst_alert is not None and _to_utc(burst_alert.cycle_started_at) == started_at
+        result.refill_reason = "high_utilization" if burst_triggered else "normal"
+        result.refill_alert_message = (
+            BURST_REFILL_ALERT_MESSAGES[language] if burst_triggered else REFILL_ALERT_MESSAGES[language]
+        )
+    if usage_count:
+        activate_usage_survey(db, pack, language)
+    survey = pending_survey(db, pack.user_id)
+    if survey is not None:
+        result.survey_required = True
+        result.survey_id = survey.id
+        result.survey_url = f"/pilot/surveys/{survey.id}"
     return result
 
 
 @router.get("/pack", response_model=PackStatus)
 def read_pack(user: PilotUser = Depends(participant), db: Session = Depends(get_db)):
-    return pack_status(db, get_pack(db, user), datetime.now(timezone.utc))
+    pack = get_pack(db, user, lock=True)
+    result = pack_status(db, pack, datetime.now(timezone.utc), message_language(db, user.id))
+    db.commit()
+    return result
 
 
 @router.post("/pack/start", response_model=PackStatus)
@@ -108,39 +316,419 @@ def start_pack(user: PilotUser = Depends(participant), db: Session = Depends(get
     now = datetime.now(timezone.utc)
     if pack.started_at is None:
         pack.started_at = now
-    result = pack_status(db, pack, now)
+    result = pack_status(db, pack, now, message_language(db, user.id))
     db.commit()
     return result
 
 
-@router.post("/pack/usage", response_model=PackStatus)
+@router.post("/pack/usage", response_model=UsageResult)
 def record_usage(
     tap: UsageTap,
     user: PilotUser = Depends(participant),
     db: Session = Depends(get_db),
+    language: str | None = Query(None, pattern="^(en|fr)$"),
+    defer_oracle: bool = Query(False),
 ):
+    return record_pack_event(
+        db, user, tap.request_id, language, refill=False, defer_oracle=defer_oracle
+    )
+
+
+@router.post("/pack/refill", response_model=UsageResult)
+def record_refill(
+    event: UsageTap,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+    language: str | None = Query(None, pattern="^(en|fr)$"),
+    defer_oracle: bool = Query(False),
+):
+    return record_pack_event(
+        db, user, event.request_id, language, refill=True, defer_oracle=defer_oracle,
+    )
+
+
+def usage_message_context(db: Session, pack_id: int, now: datetime) -> dict:
+    last_use = db.scalar(select(func.max(PilotUsageEvent.occurred_at)).where(
+        PilotUsageEvent.pack_id == pack_id,
+    ))
+    elapsed = now - _to_utc(last_use) if last_use is not None else None
+    return {
+        "possible_double_use": elapsed is not None and timedelta(0) <= elapsed < POSSIBLE_DOUBLE_USE_GAP,
+        "days_since_previous_use": elapsed.days if elapsed is not None and elapsed >= timedelta(days=7) else None,
+    }
+
+
+def record_pack_event(db, user, request_id, language, *, refill, defer_oracle=False):
     pack = get_pack(db, user, lock=True)
     if pack.started_at is None:
-        raise HTTPException(409, "Start the pilot pack before logging usage")
+        raise HTTPException(409, "Start the pilot pack before logging events")
 
-    request_id = str(tap.request_id)
-    duplicate = db.scalar(select(PilotUsageEvent.id).where(
-        PilotUsageEvent.pack_id == pack.id,
-        PilotUsageEvent.request_id == request_id,
+    model = PilotRefillEvent if refill else PilotUsageEvent
+    request_id = str(request_id)
+    duplicate = db.scalar(select(model.id).where(
+        model.pack_id == pack.id, model.request_id == request_id
     ))
     now = datetime.now(timezone.utc)
-    result = pack_status(db, pack, now)
+    language = message_language(db, user.id)
+    before = pack_status(db, pack, now, language)
+    result = before
+    points_earned = 0
+    usage_context = None
+    pack_event = None
     if duplicate is None:
-        if result.current_weight_g == 0:
-            raise HTTPException(409, "The pilot pack is empty")
-        db.add(PilotUsageEvent(
-            pack_id=pack.id,
-            request_id=request_id,
-            grams_used=min(DOSE_G, result.current_weight_g),
-            occurred_at=now,
-        ))
+        if refill:
+            if before.current_volume_l == before.capacity_l:
+                raise HTTPException(409, "The pilot pack is already full")
+            latest_usage_id = db.scalar(select(func.max(PilotUsageEvent.id)).where(
+                PilotUsageEvent.pack_id == pack.id
+            ))
+            pack_event = PilotRefillEvent(
+                pack_id=pack.id, request_id=request_id, after_usage_id=latest_usage_id,
+                occurred_at=now,
+            )
+            points_earned = REFILL_POINTS
+        else:
+            if before.current_volume_l == 0:
+                raise HTTPException(409, "The pilot pack is empty")
+            usage_context = usage_message_context(db, pack.id, now)
+            pack_event = PilotUsageEvent(
+                pack_id=pack.id, request_id=request_id,
+                volume_used_ml=min(DOSE_ML, round(before.current_volume_l * 1000)),
+                occurred_at=now,
+            )
+            points_earned = USAGE_POINTS
+        db.add(pack_event)
         db.flush()
-        result = pack_status(db, pack, now)
+        result = pack_status(db, pack, now, language, milestone_request_id=request_id)
+        if usage_context is not None:
+            usage_context.update(result.usage_overuse)
+            previous_pct = before.current_volume_l / before.capacity_l * 100
+            remaining_pct = result.current_volume_l / result.capacity_l * 100
+            usage_context["stock_milestone_percent"] = next(
+                (level for level in (10, 25, 50) if remaining_pct <= level < previous_pct),
+                None,
+            )
+
+    unlocked = result.cashback_earned_cents - before.cashback_earned_cents
+    oracle_url = None
+    if defer_oracle:
+        oracle_model = PilotRefillOracle if refill else PilotUsageOracle
+        event_kind = "refill" if refill else "usage"
+        if pack_event is not None:
+            event_key = {"refill_id" if refill else "usage_id": pack_event.id}
+            db.add(oracle_model(
+                **event_key,
+                payload=stock_message_payload(
+                    result, language, points_earned=points_earned,
+                    cashback_unlocked_cents=unlocked, event=event_kind, usage_context=usage_context,
+                ),
+            ))
+            oracle_url = f"/pilot/pack/{event_kind}/{request_id}/oracle"
+        elif duplicate is not None and db.get(oracle_model, duplicate) is not None:
+            oracle_url = f"/pilot/pack/{event_kind}/{request_id}/oracle"
+
+    db.commit()
+    if defer_oracle:
+        oracle = OracleMessage(
+            stock_status=result.stock_status, message=None, language=language,
+            source="deferred" if oracle_url else "skipped",
+            refill_alert_message=result.refill_alert_message,
+        )
+    else:
+        oracle = stock_message(
+            result, language, points_earned=points_earned, cashback_unlocked_cents=unlocked,
+            event="refill" if refill else "usage", usage_context=usage_context,
+            generate=bool(points_earned),
+        )
+    return UsageResult(
+        **result.model_dump(exclude_computed_fields=True), points_earned=points_earned,
+        refill_recorded=refill and duplicate is None,
+        cashback_unlocked_cents=unlocked, oracle=oracle, oracle_url=oracle_url,
+    )
+
+
+@router.post("/pack/usage/{request_id}/oracle", response_model=OracleMessage)
+def read_usage_oracle(
+    request_id: UUID,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    return read_event_oracle(request_id, user, db, refill=False)
+
+
+@router.post("/pack/refill/{request_id}/oracle", response_model=OracleMessage)
+def read_refill_oracle(
+    request_id: UUID,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    return read_event_oracle(request_id, user, db, refill=True)
+
+
+def read_event_oracle(request_id: UUID, user: PilotUser, db: Session, *, refill: bool):
+    pack = get_pack(db, user)
+    event_model = PilotRefillEvent if refill else PilotUsageEvent
+    oracle_model = PilotRefillOracle if refill else PilotUsageOracle
+    event_id = oracle_model.refill_id if refill else oracle_model.usage_id
+    saved = db.execute(
+        select(event_id, oracle_model.payload, oracle_model.message).join(event_model).where(
+            event_model.pack_id == pack.id,
+            event_model.request_id == str(request_id),
+        )
+    ).one_or_none()
+    if saved is None:
+        raise HTTPException(404, "Refill message not found" if refill else "Usage message not found")
+
+    saved_id, payload, message = saved
+    current_language = message_language(db, user.id)
+    if (
+        payload.get("cashback_points_per_euro") != POINTS_PER_EURO
+        or payload.get("language_policy_version") != PILOT_LANGUAGE_POLICY_VERSION
+        or payload.get("language") != current_language
+    ):
+        total = payload["total_points"]
+        earned = payload["points_earned"]
+        payload = {
+            **payload,
+            "cashback_points_per_euro": POINTS_PER_EURO,
+            "language_policy_version": PILOT_LANGUAGE_POLICY_VERSION,
+            "language": current_language,
+            "cashback_earned_cents": (total // POINTS_PER_EURO) * 100,
+            "cashback_unlocked_cents": (
+                total // POINTS_PER_EURO - (total - earned) // POINTS_PER_EURO
+            ) * 100,
+            "points_to_next_cashback": POINTS_PER_EURO - total % POINTS_PER_EURO,
+        }
+        db.execute(update(oracle_model).where(event_id == saved_id).values(
+            payload=payload, message=None,
+        ))
+        db.commit()
+        message = None
+    db.rollback()
+    if message is None:
+        message, _ = oracle_copy(payload, None)
+        if message is not None:
+            db.execute(update(oracle_model).where(
+                event_id == saved_id, oracle_model.message.is_(None)
+            ).values(message=message))
+            db.commit()
+            message = db.scalar(select(oracle_model.message).where(
+                event_id == saved_id
+            ))
+    return OracleMessage(
+        stock_status=payload["stock_status"], language=payload["language"],
+        message=message,
+        source="kimi" if message else "unavailable",
+    )
+
+
+@router.get("/pack/oracle", response_model=OracleMessage)
+def read_oracle(
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+    language: str | None = Query(None, pattern="^(en|fr)$"),
+):
+    pack = get_pack(db, user, lock=True)
+    language = message_language(db, user.id)
+    status = pack_status(db, pack, datetime.now(timezone.utc), language)
+    db.commit()
+    return stock_message(status, language)
+
+
+@router.post("/prices")
+def search_prices(
+    query: PriceSearch,
+    tasks: BackgroundTasks,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+    progressive: bool = False,
+):
+    user_id = user.id
+    language = message_language(db, user_id)
+    if progressive:
+        now = datetime.now(timezone.utc)
+        db.execute(delete(PilotPriceSearch).where(
+            PilotPriceSearch.created_at < now - timedelta(hours=1)
+        ))
+        search = PilotPriceSearch(
+            id=str(uuid4()), user_id=user_id, created_at=now, status="searching",
+        )
+        snapshot = {**price_search_snapshot(search, now), "language": language}
+        db.add(search)
+        db.commit()
+        tasks.add_task(run_price_search, snapshot["search_id"], query, language)
+        return snapshot
+
+    scores = preference_scores(db, user_id, query.brand, query.country)
+    db.rollback()
+    result = pilot_prices(
+        query.brand, language, query.city, query.country,
+        refresh=query.refresh, postal_code=query.postal_code, preferences=scores,
+    )
+    search = PilotPriceSearch(
+        id=str(uuid4()), user_id=user_id, created_at=datetime.now(timezone.utc),
+        status="complete", result=result,
+    )
+    db.add(search)
+    db.commit()
+    return {**result, "search_id": search.id, "status_url": f"/pilot/prices/{search.id}"}
+
+
+@router.get("/prices/{search_id}")
+def read_price_search(
+    search_id: UUID,
+    tasks: BackgroundTasks,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    search = db.scalar(select(PilotPriceSearch).where(
+        PilotPriceSearch.id == str(search_id),
+        PilotPriceSearch.user_id == user.id,
+        PilotPriceSearch.created_at >= now - timedelta(hours=1),
+    ).with_for_update())
+    if search is None:
+        raise HTTPException(404, "Price search not found")
+    language = message_language(db, user.id)
+    if (
+        search.status == "complete" and search.result
+        and (search.result.get("language") != language
+             or search.result.get("language_policy_version") != PILOT_LANGUAGE_POLICY_VERSION)
+    ):
+        search.result = {
+            **search.result, "language": language, "message": None,
+            "language_policy_version": PILOT_LANGUAGE_POLICY_VERSION,
+            "message_source": None,
+        }
+        search.status = "summarizing"
+        db.commit()
+        tasks.add_task(translate_price_search, search.id, language)
+    return {**price_search_snapshot(search, now), "language": language}
+
+
+class OfferInteraction(BaseModel):
+    request_id: UUID
+    search_id: UUID
+    offer_url: str = Field(max_length=8192)
+    action: Literal["click", "select"]
+
+
+@router.post("/prices/preferences", status_code=204)
+def record_offer_preference(
+    event: OfferInteraction,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    get_pack(db, user, lock=True)
+    existing = db.scalar(select(PilotOfferPreference).where(
+        PilotOfferPreference.user_id == user.id,
+        PilotOfferPreference.request_id == str(event.request_id),
+    ))
+    if existing is not None:
+        if (existing.search_id, existing.url, existing.action) != (
+            str(event.search_id), event.offer_url, event.action,
+        ):
+            raise HTTPException(409, "Request ID already used for another interaction")
+        return
+    search = db.scalar(select(PilotPriceSearch).where(
+        PilotPriceSearch.id == str(event.search_id), PilotPriceSearch.user_id == user.id,
+    ))
+    if search is None or not search.result:
+        raise HTTPException(404, "Price search not found")
+    offer = next((offer for offer in search.result.get("offers", [])
+                  if event.offer_url in (offer["url"], offer.get("outlet_url"))), None)
+    if offer is None:
+        raise HTTPException(404, "Offer not found in this search")
+    retailer = " ".join(brand_words(offer.get("retailer") or ""))
+    if not retailer:
+        raise HTTPException(422, "This offer has no identified retailer")
+    country = search.result.get("country")
+    if not country:
+        raise HTTPException(409, "Refresh prices before recording this preference")
+    db.add(PilotOfferPreference(
+        user_id=user.id, request_id=str(event.request_id), search_id=search.id,
+        url=event.offer_url, retailer=retailer,
+        brand=" ".join(brand_words(search.result["reference_brand"])),
+        country=country, action=event.action, occurred_at=datetime.now(timezone.utc),
+    ))
+    db.commit()
+
+
+@router.get("/surveys", response_model=list[SurveyView])
+def read_surveys(
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    surveys = db.scalars(select(PilotRefillSurvey).where(
+        PilotRefillSurvey.user_id == user.id,
+    ).order_by(PilotRefillSurvey.refilled_at.desc(), PilotRefillSurvey.id).limit(limit).offset(offset))
+    return [survey_view(survey, db) for survey in surveys]
+
+
+def get_survey(db, user_id, survey_id, *, lock=False):
+    query = select(PilotRefillSurvey).where(
+        PilotRefillSurvey.id == str(survey_id), PilotRefillSurvey.user_id == user_id,
+    )
+    survey = db.scalar(query.with_for_update() if lock else query)
+    if survey is None:
+        raise HTTPException(404, "Survey not found")
+    return survey
+
+
+@router.get("/surveys/questions")
+def read_survey_questions(
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    pack = get_pack(db, user, lock=True)
+    language = message_language(db, user.id)
+    activate_usage_survey(db, pack, language)
+    survey = pending_survey(db, user.id)
+    db.commit()
+    return {
+        "version": SURVEY_VERSION,
+        "question_count": len(SurveyAnswers.model_fields),
+        "language": language,
+        "questions": survey_questions(language),
+        "survey_id": survey.id if survey else None,
+        "survey_url": f"/pilot/surveys/{survey.id}" if survey else None,
+        "can_submit": survey is not None,
+    }
+
+
+@router.get("/surveys/{survey_id}", response_model=SurveyView)
+def read_survey(
+    survey_id: UUID,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    return survey_view(get_survey(db, user.id, survey_id), db)
+
+
+@router.post("/surveys/{survey_id}", response_model=SurveyView)
+def submit_survey(
+    survey_id: UUID,
+    answers: SurveyAnswers | VersionTwoSurveyAnswers | LegacySurveyAnswers,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    get_pack(db, user, lock=True)
+    survey = get_survey(db, user.id, survey_id, lock=True)
+    active = current_survey(db, user.id)
+    if active is None or active.id != survey.id:
+        raise HTTPException(409, "This survey is no longer active. Refresh the survey tab.")
+    values = answers.model_dump()
+    if survey.submitted_at is not None:
+        if saved_survey_answers(survey, db).model_dump() != values:
+            raise HTTPException(409, "This survey has already been submitted")
+        return survey_view(survey, db)
+    if not isinstance(answers, SurveyAnswers):
+        raise HTTPException(422, "Answer all six survey questions")
+    save_survey_answers(survey, answers, db)
+    survey.submitted_at = datetime.now(timezone.utc)
+    result = survey_view(survey, db)
     db.commit()
     return result
 

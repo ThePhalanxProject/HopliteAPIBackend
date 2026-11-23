@@ -1,0 +1,635 @@
+from concurrent.futures import ThreadPoolExecutor
+
+import logging
+import re
+from decimal import Decimal
+from math import isfinite
+from os import getenv
+from unicodedata import combining, normalize
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+import pycountry
+import requests
+from fastapi import HTTPException
+from pydantic import BaseModel, Field, field_validator
+
+from agent import AgentError, PILOT_LANGUAGE_POLICY_VERSION, call_hoplite_agent
+from pilot_amazon import AMAZON_MARKETPLACES, amazon_results, amazon_retailer, amazon_country_conflict, offer_identity
+
+logger = logging.getLogger(__name__)
+
+
+class OracleMessage(BaseModel):
+    language: str = "en"
+    stock_status: str
+    refill_alert_message: str | None = None
+    message: str | None
+    source: str
+
+
+class PriceSearch(BaseModel):
+    brand: str = Field(min_length=2, max_length=100, pattern=r"\S")
+    city: str = Field(min_length=2, max_length=100)
+    country: str = Field(pattern=r"^[a-z]{2}$")
+    postal_code: str | None = Field(default=None, max_length=16, pattern=r"^[A-Za-z0-9][A-Za-z0-9 -]*$")
+    language: str | None = Field(default=None, pattern=r"^(en|fr)$")
+    refresh: bool = False
+
+    @field_validator("brand", "city", "country", "postal_code", mode="before")
+    @classmethod
+    def clean_location_input(cls, value):
+        if not isinstance(value, str):
+            return value
+        return value.strip()
+
+    @field_validator("country", mode="before")
+    @classmethod
+    def lowercase_country(cls, value):
+        return value.lower() if isinstance(value, str) else value
+
+
+STOCK_STYLES = (
+    "Lead with the stock outlook.",
+    "Lead with the reward if earned, then give the stock outlook.",
+    "Use a warm, conversational update.",
+    "Use a concise Oracle-style observation with a practical next step if stock is low.",
+)
+
+
+def oracle_copy(payload, fallback, *, generate=True):
+    if generate:
+        try:
+            response = call_hoplite_agent(payload, pilot_mode=True)
+        except AgentError as exc:
+            logger.warning("Pilot Oracle generation failed: %s", exc)
+            return fallback, "fallback"
+        if response is None:
+            logger.warning("Pilot Oracle credentials are not configured")
+            return fallback, "fallback"
+        if response:
+            message = response.get("message")
+            if isinstance(message, str) and 0 < len(message.strip()) <= (12000 if payload.get("task") == "shopping_update" else 300):
+                return message.strip(), "kimi"
+        logger.warning("Pilot Oracle response had no usable message")
+    return fallback, "fallback"
+
+
+def stock_message_payload(
+    pack, language, *, points_earned=0, cashback_unlocked_cents=0,
+    event=None, usage_context=None,
+):
+    return {
+        "task": "stock_update",
+        "language_policy_version": PILOT_LANGUAGE_POLICY_VERSION,
+        "stock_status": pack.stock_status,
+        "refill_reason": pack.refill_reason,
+        "days_remaining": pack.days_remaining,
+        "current_volume_l": pack.current_volume_l,
+        "capacity_l": pack.capacity_l,
+        "dose_ml": pack.dose_ml,
+        "full_doses_remaining": pack.full_doses_remaining,
+        "stock_remaining_percent": round(pack.current_volume_l / pack.capacity_l * 100, 1),
+        "usage_context": usage_context,
+        "event": event,
+        "points_earned": points_earned,
+        "total_points": pack.user_points,
+        "cashback_points_per_euro": pack.cashback_points_per_euro,
+        "cashback_progress_points": pack.cashback_progress_points,
+        "cashback_earned_cents": pack.cashback_earned_cents,
+        "cashback_unlocked_cents": cashback_unlocked_cents,
+        "points_to_next_cashback": pack.points_to_next_cashback,
+        "language": language,
+        "style": STOCK_STYLES[pack.sample_count % len(STOCK_STYLES)],
+        "variation_id": str(uuid4()),
+    }
+
+
+def stock_message(
+    pack, language, *, points_earned=0, cashback_unlocked_cents=0, event=None,
+    usage_context=None, generate=True
+):
+    payload = stock_message_payload(
+        pack, language, points_earned=points_earned,
+        cashback_unlocked_cents=cashback_unlocked_cents, event=event,
+        usage_context=usage_context,
+    )
+    message, _ = oracle_copy(payload, None, generate=generate)
+    source = "kimi" if message else "unavailable" if generate else "skipped"
+    return OracleMessage(
+        stock_status=pack.stock_status, message=message, source=source, language=language,
+        refill_alert_message=pack.refill_alert_message,
+    )
+
+
+WASH_COUNT = re.compile(
+    r"\b([1-9][0-9]{0,3})\s*(?:lavages?|lessives?|doses?|wash(?:es)?|loads?)\b",
+    re.IGNORECASE,
+)
+MULTIPACK = re.compile(r"\b(?:lot de|pack of|multipack|[2-9]\s*[x×])\b", re.IGNORECASE)
+
+
+def shopping_results(query, location, country, language, key, *, refresh=False):
+    params = {
+        "engine": "google_shopping", "q": query, "location": location,
+        "gl": country, "hl": language, "api_key": key,
+    }
+    if refresh:
+        params["no_cache"] = "true"
+    try:
+        response = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=8,
+        )
+        response.raise_for_status()
+        data = response.json()
+        results = data.get("shopping_results", [])
+        if data.get("error") or not isinstance(results, list):
+            raise ValueError("Invalid shopping results")
+        return results
+    except (requests.RequestException, ValueError, AttributeError):
+        raise HTTPException(502, "Shopping search is temporarily unavailable") from None
+
+
+def brand_words(value: str) -> list[str]:
+    folded = normalize("NFKD", value.casefold())
+    return re.findall(r"[^\W_]+", "".join(char for char in folded if not combining(char)))
+
+
+def matches_brand(row: dict, title: str, requested: list[str]) -> bool:
+    if not requested:
+        return False
+    listed_brand = row.get("brand")
+    if isinstance(listed_brand, str) and listed_brand.strip():
+        return brand_words(listed_brand) == requested
+
+    words = brand_words(title)
+    if set(words) & {"alternative", "compatible", "equivalent", "replacement", "substitute"}:
+        return False
+    # Listings often begin with a product category before naming the brand.
+    category_prefix = {"lessive", "liquide", "liquid", "laundry", "detergent", "de", "marque"}
+    for index in range(len(words)):
+        if words[index:index + len(requested)] == requested:
+            return True
+        if words[index] not in category_prefix:
+            return False
+    return False
+
+
+BUSINESS_ONLY = re.compile(
+    r"\b(?:b2b|wholesal(?:e|er|ers)|grossist(?:e|es)|"
+    r"réservé aux professionnels|professionals only|trade only|"
+    r"hors taxes|(?:prix )?h\.?\s?t\.?|"
+    r"(?:ex(?:cl(?:uding)?)?\.?[-\s]+vat|without vat|before tax|"
+    r"ex\.?[-\s]+tax|vat not included|iva esclusa|htva))\b",
+    re.IGNORECASE,
+)
+BUSINESS_SELLERS = {"kechiq", "kechiq srl", "damiano profumi"}
+BUSINESS_DOMAINS = ("damianoprofumi.it",)
+
+
+def consumer_offer(row):
+    source = row.get("source")
+    if isinstance(source, str):
+        seller = " ".join(brand_words(source))
+        if seller in BUSINESS_SELLERS:
+            return None
+    else:
+        source = None
+
+    metadata = " ".join(
+        str(row.get(field) or "")
+        for field in ("source", "title", "price", "snippet", "extensions", "tag", "badge", "details_and_offers", "seller", "seller_name", "offers")
+    )
+    if BUSINESS_ONLY.search(metadata) or "amazon business" in metadata.casefold():
+        return None
+
+    links = [row.get("link"), row.get("product_link")]
+    # Prefer a retailer URL over a Google product page when either is supplied.
+    links.sort(key=lambda link: bool(
+        isinstance(link, str) and re.match(r"https://(?:[^/]+\.)?google\.[^/]+/", link)
+    ))
+    for link in links:
+        if not isinstance(link, str):
+            continue
+        try:
+            url = urlsplit(link)
+        except ValueError:
+            continue
+        host = url.hostname or ""
+        if url.scheme != "https" or not host or url.username or url.password:
+            continue
+        if any(host == domain or host.endswith("." + domain) for domain in BUSINESS_DOMAINS):
+            return None
+        return source, link
+    return None
+
+
+FULFILLMENT_DESTINATION = re.compile(
+    r"(?:available for |free |standard |express )?"
+    r"(?:delivery (?:available |only )?(?:to|in|across)|(?:ships|shipping) (?:to|in|across)|"
+    r"livraison (?:gratuite )?(?:disponible )?(?:a|en|vers)|"
+    r"(?:in store |store )?(?:pickup|pick up) (?:available )?(?:at|in|from)|"
+    r"retrait (?:en magasin )?(?:disponible )?a) (?P<destination>.+)"
+)
+GENERIC_DESTINATION = re.compile(
+    r"(?:(?:your|a|un|votre|domicile|local|nearby|store|magasin|home|nationwide|today|tomorrow|most addresses|nearest store|next [0-9])\b|"
+    r"(?:as little as|up to|moins de|sous)\b|"
+    r"\d+(?: (?:to |a )?\d+)? (?:business |working |ouvrables? )?(?:days?|jours?|hours?|heures?|minutes?)\b)"
+)
+DESTINATION_SUFFIX = re.compile(
+    r"^(?:the )| (?:only|seulement|uniquement)$| (?:by|within|between|sous|entre|pour) .+$"
+)
+
+
+def location_evidence(city: str, country: str, postal_code: str | None) -> re.Pattern:
+    country_record = pycountry.countries.get(alpha_2=country.upper())
+    country_names = {country}
+    if country_record is not None:
+        country_names.update((country_record.name, country_record.alpha_3))
+        if official_name := getattr(country_record, "official_name", None):
+            country_names.add(official_name)
+    country_names.update({
+        "fr": {"France métropolitaine", "mainland France"},
+        "gb": {"UK", "Great Britain", "Royaume-Uni"},
+        "us": {"États-Unis"},
+        "de": {"Allemagne"},
+        "es": {"Espagne"},
+        "it": {"Italie"},
+        "be": {"Belgique"},
+        "ch": {"Suisse"},
+    }.get(country, ()))
+
+    city_name = re.escape(" ".join(brand_words(city)))
+    postcode = "".join(brand_words(postal_code or ""))
+    # A postcode narrows an explicit postcode claim. City-only claims still qualify.
+    postcode_pattern = r" ?".join(re.escape(char) for char in postcode) if postcode else r"\d{4,6}"
+    locality = rf"(?:(?:{postcode_pattern}) )?{city_name}(?: (?:{postcode_pattern}))?"
+    countries = "|".join(re.escape(" ".join(brand_words(name))) for name in sorted(country_names))
+    return re.compile(rf"(?:{locality}(?: (?:{countries}))?|{countries})")
+
+
+def conflicts_with_location(row: dict, evidence: re.Pattern) -> bool:
+    # Only fulfillment details can provide a destination. Seller names, domains,
+    # currency and generic shipping claims are not geographic evidence.
+    seller = row.get("source")
+    seller_name = " ".join(brand_words(seller)) if isinstance(seller, str) else ""
+    for field in ("delivery", "shipping", "details_and_offers", "extensions"):
+        values = row.get(field)
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            detail = " ".join(brand_words(value))
+            match = FULFILLMENT_DESTINATION.fullmatch(detail)
+            if match is None:
+                continue
+            destination = DESTINATION_SUFFIX.sub("", match["destination"])
+            if (
+                evidence.fullmatch(destination)
+                or GENERIC_DESTINATION.match(destination)
+                or destination == seller_name
+            ):
+                continue
+            return True
+    return False
+
+
+RETAIL_CHAINS = {
+    "ae": ("Carrefour", "LuLu Hypermarket", "Spinneys", "Union Coop", "Nesto Hypermarket"),
+    "be": ("Colruyt", "Delhaize", "Carrefour"),
+    "de": ("Edeka", "REWE", "Kaufland", "Lidl", "Aldi"),
+    "eg": ("Carrefour", "Spinneys", "Hyper One", "Kazyon"),
+    "es": ("Mercadona", "Carrefour", "Lidl", "Dia", "Alcampo"),
+    "fr": ("E.Leclerc", "Carrefour", "Intermarché", "Auchan", "Super U", "Lidl"),
+    "gb": ("Tesco", "Sainsbury's", "Asda", "Morrisons", "Waitrose"),
+    "it": ("Conad", "Coop", "Esselunga", "Lidl", "Eurospin"),
+    "sa": ("Panda", "Al Othaim Markets", "LuLu Hypermarket", "Danube", "BinDawood", "Tamimi Markets"),
+    "us": ("Walmart", "Kroger", "Albertsons", "Safeway", "Aldi"),
+    "za": ("Shoprite", "Checkers", "Pick n Pay", "Woolworths", "SPAR"),
+}
+
+
+def major_retailer(retailer: str | None, country: str) -> bool:
+    if amazon_retailer(retailer, country):
+        return True
+    seller = " ".join(brand_words(retailer or ""))
+    for chain in RETAIL_CHAINS.get(country, ()):
+        name = " ".join(brand_words(chain))
+        if seller == name or seller.startswith(name + " "):
+            return True
+    return False
+
+
+def shopping_query(brand: str, language: str, country: str) -> str:
+    category = "lessive liquide machine lavages" if language == "fr" else "liquid laundry detergent washes"
+    query = f"{brand} {category}"
+    chains = RETAIL_CHAINS.get(country, ())
+    if chains:
+        # Retailer names guide discovery. Offer eligibility remains seller-neutral.
+        general_terms = ("supermarché", "achat en ligne") if language == "fr" else ("supermarket", "buy online")
+        retailer_terms = " OR ".join(f'"{name}"' for name in (*chains, *general_terms))
+        query = f"{query} ({retailer_terms})"
+    return query
+
+
+OFFICIAL_RETAILER_SITES = {
+    "fr": {
+        "carrefour": "https://www.carrefour.fr/",
+        "e leclerc": "https://www.e.leclerc/",
+        "leclerc": "https://www.e.leclerc/",
+        "intermarche": "https://www.intermarche.com/",
+        "auchan": "https://www.auchan.fr/",
+        "super u": "https://www.coursesu.com/",
+        "hyper u": "https://www.coursesu.com/",
+        "courses u": "https://www.coursesu.com/",
+        "lidl": "https://www.lidl.fr/",
+    },
+}
+
+
+def outlet_homepage(retailer, country, links):
+    seller = " ".join(brand_words(retailer or ""))
+    if not seller:
+        return None
+    if amazon_retailer(retailer, country) and country in AMAZON_MARKETPLACES:
+        return f"https://www.{AMAZON_MARKETPLACES[country]}/"
+    for name, homepage in OFFICIAL_RETAILER_SITES.get(country, {}).items():
+        if seller == name or seller.startswith(name + " "):
+            return homepage
+    seller_key = "".join(brand_words(retailer))
+    for link in links:
+        if not isinstance(link, str):
+            continue
+        try:
+            parsed = urlsplit(link)
+            host = parsed.hostname or ""
+            port = parsed.port
+        except ValueError:
+            continue
+        if parsed.scheme != "https" or parsed.username or parsed.password or port not in (None, 443):
+            continue
+        if re.search(r"(?:^|\\.)(?:google\\.[a-z.]+|bing\\.com|serpapi\\.com)$", host):
+            continue
+        # A matching merchant domain supplies evidence for sellers outside the registry.
+        domain_key = "".join(brand_words(host.replace("www.", "")))
+        if seller_key and seller_key in domain_key:
+            return f"https://{host}/"
+    return None
+
+
+def find_official_outlet(retailer, country, language, location):
+    """Search for a missing homepage and let Kimi select a returned source."""
+    if not retailer:
+        return None
+    key = getenv("SERPAPI_API_KEY")
+    if not key:
+        return None
+    record = pycountry.countries.get(alpha_2=country.upper())
+    country_name = record.name if record else country
+    try:
+        response = requests.get(
+            "https://serpapi.com/search.json",
+            params={
+                "engine": "google", "q": f"{retailer} {country_name} official online store",
+                "gl": country, "hl": language, "location": location, "api_key": key,
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        data = response.json()
+        rows = data.get("organic_results", [])
+        if data.get("error") or not isinstance(rows, list):
+            return None
+        candidates = []
+        for row in rows[:8]:
+            if not isinstance(row, dict):
+                continue
+            link = row.get("link")
+            if not isinstance(link, str):
+                continue
+            try:
+                parsed = urlsplit(link)
+                host = parsed.hostname or ""
+                port = parsed.port
+            except ValueError:
+                continue
+            if parsed.scheme != "https" or not host or parsed.username or parsed.password or port not in (None, 443):
+                continue
+            if re.search(r"(?:^|\.)(?:google\.[a-z.]+|bing\.com|serpapi\.com|facebook\.com|instagram\.com|wikipedia\.org)$", host):
+                continue
+            candidates.append({
+                "id": str(len(candidates)),
+                "title": str(row.get("title") or "")[:200],
+                "snippet": str(row.get("snippet") or "")[:600],
+                "homepage": f"https://{host}/",
+            })
+        if not candidates:
+            return None
+        answer = call_hoplite_agent({
+            "task": "outlet_homepage_lookup", "retailer": retailer,
+            "country": country_name, "city": location, "candidates": candidates,
+        }, pilot_mode=True)
+        selected = answer.get("message") if isinstance(answer, dict) else None
+        return next((candidate["homepage"] for candidate in candidates
+                     if candidate["id"] == selected), None)
+    except (requests.RequestException, ValueError, AttributeError, AgentError):
+        logger.warning("Official outlet lookup failed for %s in %s", retailer, country)
+        return None
+
+
+def resolve_outlet_sites(offers, country, language, location):
+    resolved = []
+    for offer in offers:
+        homepage = offer.get("outlet_url") or outlet_homepage(
+            offer["retailer"], country, (offer["url"],),
+        )
+        resolved.append({**offer, "outlet_url": homepage})
+    missing = {offer["retailer"] for offer in resolved
+               if not offer["outlet_url"] and offer["retailer"]}
+    # Resolve each seller once, concurrently, while retaining the original ranking.
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {seller: executor.submit(
+            find_official_outlet, seller, country, language, location,
+        ) for seller in missing}
+        found = {seller: future.result() for seller, future in futures.items()}
+    return [
+        {**offer, "outlet_url": offer["outlet_url"] or found.get(offer["retailer"])}
+        for offer in resolved
+        if offer["outlet_url"] or found.get(offer["retailer"])
+    ]
+
+
+def combined_shopping_results(brand, language, location, country, key, *, refresh=False, postal_code=None):
+    """Always attempt the general and Amazon searches concurrently."""
+    rows, errors = [], []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        general = executor.submit(
+            shopping_results, shopping_query(brand, language, country),
+            location, country, language, key, refresh=refresh,
+        )
+        amazon = executor.submit(
+            amazon_results, brand, language, location, country, key,
+            refresh=refresh, postal_code=postal_code,
+        )
+        for name, future in (("shopping", general), ("Amazon", amazon)):
+            try:
+                rows.extend(future.result())
+            except HTTPException as exc:
+                errors.append(exc)
+                logger.warning("%s lookup unavailable for country %s", name, country)
+    if len(errors) == 2:
+        raise errors[0]
+    return rows
+
+
+def search_price_offers(brand, language, location, country, *, refresh=False, postal_code=None, preferences=None):
+    key = getenv("SERPAPI_API_KEY")
+    if not key:
+        raise HTTPException(503, "Shopping search is not configured")
+    rows = combined_shopping_results(
+        brand, language, location, country, key, refresh=refresh, postal_code=postal_code
+    )
+    requested_brand = brand_words(brand)
+    evidence = location_evidence(location, country, postal_code)
+
+    offers = []
+    seen_links = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("second_hand_condition"):
+            continue
+        amount = row.get("extracted_price")
+        price = row.get("price")
+        title = row.get("title")
+        consumer = consumer_offer(row)
+        if (
+            not isinstance(amount, (int, float))
+            or isinstance(amount, bool)
+            or not isfinite(amount)
+            or amount <= 0
+            or consumer is None
+            or not isinstance(price, str)
+            or not isinstance(title, str)
+            or MULTIPACK.search(title)
+            or not matches_brand(row, title, requested_brand)
+            or conflicts_with_location(row, evidence)
+            or amazon_country_conflict(row, country)
+        ):
+            continue
+        retailer, link = consumer
+        identity = offer_identity(link)
+        if identity in seen_links:
+            continue
+        counts = set(WASH_COUNT.findall(title))
+        currency = re.sub(r"[\d.,\s]", "", price)
+        currency = {"EUR": "€", "GBP": "£", "USD": "US$"}.get(currency, currency)
+        if len(counts) != 1 or not currency:
+            continue
+        washes = int(counts.pop())
+        seen_links.add(identity)
+        offers.append({
+            "title": title, "retailer": retailer, "listed_price": price,
+            "wash_count": washes, "currency": currency, "url": link,
+            "price_per_wash": Decimal(str(amount)) / washes,
+            "outlet_url": outlet_homepage(retailer, country, (row.get("link"), row.get("product_link"))),
+        })
+
+    # Price ranking is meaningful only within a common currency.
+    currency = max((o["currency"] for o in offers), key=lambda c: sum(o["currency"] == c for o in offers), default=None)
+    def rank(offer):
+        return (
+            not major_retailer(offer["retailer"], country),
+            offer["price_per_wash"] / (1 + Decimal(str(min(
+                (preferences or {}).get(" ".join(brand_words(offer["retailer"] or "")), 0) * 0.05, 0.15
+            )))),
+            offer["price_per_wash"],
+        )
+    ranked = sorted((o for o in offers if o["currency"] == currency), key=rank)
+    offers = ranked[:5]
+    best_amazon = next((offer for offer in ranked if amazon_retailer(offer["retailer"], country)), None)
+    if best_amazon is not None and best_amazon not in offers:
+        offers = sorted([*offers[:4], best_amazon], key=rank)
+    for offer in offers:
+        offer["price_per_wash"] = float(round(offer["price_per_wash"], 4))
+        offer["preference_score"] = (preferences or {}).get(" ".join(brand_words(offer["retailer"] or "")), 0)
+    result = {"location": location, "reference_brand": brand, "reference_volume_l": 1.5, "country": country, "language": language, "offers": offers}
+    return result
+
+
+def shopping_message_with_urls(offers, message, language):
+    """Assemble every bullet with prices and URLs from the verified search."""
+    lines = [line.strip() for line in (message or "").splitlines() if line.strip()]
+    valid_names = (
+        len(lines) == len(offers)
+        and all(line.startswith("- ") and len(line.split(" | ")) == 4 for line in lines)
+    )
+    per_use = "Par utilisation" if language == "fr" else "Per use"
+    bullets = []
+    for index, offer in enumerate(offers):
+        name = lines[index][2:].split(" | ")[0] if valid_names else offer["title"]
+        name = " ".join(name.split())[:200]
+        # Product and outlet labels are text; only prices use bold markup.
+        name = re.sub(r"[\\`*{}\[\]<>|]", "", name)
+        outlet = re.sub(r"[\\`*{}\[\]<>|]", "", " ".join((offer["retailer"] or "").split()))
+        pack_price = re.sub(r"([0-9][0-9.,]*)", r"**\1**", offer["listed_price"])
+        price_per_use = f'{offer["currency"]}**{offer["price_per_wash"]:.4f}**'
+        outlet_text = f"**{outlet}** " if outlet else ""
+        link_text = offer["outlet_url"]
+        bullets.append(
+            f'- {name} | Pack: {pack_price} | {per_use}: {price_per_use} | '
+            f'{outlet_text}{link_text}'
+        )
+    return "\n".join(bullets), valid_names
+
+
+def summarize_price_offers(result, language, country):
+    brand = result["reference_brand"]
+    location = result["location"]
+    offers = resolve_outlet_sites(result["offers"], country, language, location)
+    result = {**result, "offers": offers, "language": language,
+              "language_policy_version": PILOT_LANGUAGE_POLICY_VERSION}
+    if not offers:
+        message = (
+            f"Je n’ai trouvé aucune offre {brand} correspondant à votre recherche à {location} ({country.upper()})."
+            if language == "fr"
+            else f"I couldn’t find any {brand} offers matching your search in {location} ({country.upper()})."
+        )
+        return {**result, "message": message, "message_source": "fallback"}
+
+    message, source = oracle_copy(
+        {
+            "task": "shopping_update",
+            "offers": [
+                {
+                    "product_title": " ".join(offer["title"].split()),
+                    "pack_price": offer["listed_price"],
+                    "price_per_use": offer["price_per_wash"],
+                    "currency": offer["currency"],
+                    "outlet": offer["retailer"],
+                    "url": offer["outlet_url"],
+                }
+                for offer in offers
+            ],
+            "country": country,
+            "city": location,
+            "reference_brand": brand,
+            "language": language,
+        },
+        None,
+    )
+    message, used_kimi_names = shopping_message_with_urls(offers, message, language)
+    return {
+        **result, "message": message,
+        "message_source": source if used_kimi_names else "fallback",
+    }
+
+
+def pilot_prices(brand, language, location, country, *, refresh=False, postal_code=None, preferences=None):
+    result = search_price_offers(
+        brand, language, location, country, refresh=refresh, postal_code=postal_code, preferences=preferences,
+    )
+    return summarize_price_offers(result, language, country)
