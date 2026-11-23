@@ -235,3 +235,13 @@ class PilotAccountResetEvent(Base):
     request_id = Column(String(36))
     occurred_at = Column(DateTime(timezone=True), nullable=False)
     points_before_reset = Column(Integer, nullable=False)
+
+
+class PilotPriceBenchmark(Base):
+    __tablename__ = "pilot_price_benchmarks"
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(ForeignKey("pilot_users.id"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    status = Column(String(20), nullable=False)
+    result = Column(JSON, nullable=False)

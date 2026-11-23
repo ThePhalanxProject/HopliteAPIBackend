@@ -13,6 +13,10 @@ from database import SessionLocal
 from models import PilotMessagePreference, PilotSession, PilotUser
 
 FRENCH_ERRORS = {
+    "Enable Hostman web search before confirming this benchmark": "Activez la recherche web Hostman avant de confirmer ce test comparatif.",
+    "Kimi agent is not configured": "L’agent Kimi n’est pas configuré.",
+    "A price benchmark is already running": "Un test comparatif des prix est déjà en cours.",
+    "Price benchmark not found": "Test comparatif des prix introuvable.",
     "Invalid pilot credential": "Session invalide ou expirée. Veuillez vous reconnecter.",
     "No pilot pack assigned": "Aucun produit pilote n’est associé à votre compte.",
     "Start the pilot pack before logging events": "Activez votre produit avant d’enregistrer une utilisation.",

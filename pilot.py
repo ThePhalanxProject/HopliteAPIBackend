@@ -2,6 +2,7 @@ from argparse import ArgumentParser
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from secrets import token_urlsafe
+from os import getenv
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -19,6 +20,8 @@ from pilot_language import account_language
 from pilot_account_history import USAGE_POINTS, REFILL_POINTS, POINTS_PER_EURO, sync_cashback_history
 from pilot_preferences import preference_scores
 from pilot_price_progress import price_search_snapshot, run_price_search, translate_price_search
+from pilot_price_benchmark import PriceBenchmarkRequest, run_price_benchmark
+from models import PilotPriceBenchmark
 from database import Base, SessionLocal, engine
 from models import PilotBurstRefillAlert, PilotMessagePreference, PilotOfferPreference, PilotPack, PilotPriceSearch, PilotRefillAlert, PilotRefillEvent, PilotRefillOracle, PilotRefillSurvey, PilotSession, PilotUsageEvent, PilotUsageOracle, PilotUser
 
@@ -572,6 +575,65 @@ def search_prices(
     db.add(search)
     db.commit()
     return {**result, "search_id": search.id, "status_url": f"/pilot/prices/{search.id}"}
+
+
+@router.post("/prices/benchmarks", status_code=202)
+def start_price_benchmark(
+    query: PriceBenchmarkRequest,
+    tasks: BackgroundTasks,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    if not query.confirm_kimi_web_search_enabled:
+        raise HTTPException(422, "Enable Hostman web search before confirming this benchmark")
+    if not getenv("SERPAPI_API_KEY"):
+        raise HTTPException(503, "Shopping search is not configured")
+    if not getenv("HOSTMAN_AGENT_ACCESS_ID") or not getenv("HOSTMAN_AGENT_BEARER_TOKEN"):
+        raise HTTPException(503, "Kimi agent is not configured")
+    get_pack(db, user, lock=True)
+    now = datetime.now(timezone.utc)
+    active = db.scalar(select(PilotPriceBenchmark.id).where(
+        PilotPriceBenchmark.user_id == user.id,
+        PilotPriceBenchmark.status == "running",
+        PilotPriceBenchmark.created_at >= now - timedelta(minutes=5),
+    ).limit(1))
+    if active is not None:
+        raise HTTPException(409, "A price benchmark is already running")
+    db.execute(delete(PilotPriceBenchmark).where(
+        PilotPriceBenchmark.created_at < now - timedelta(hours=1),
+    ))
+    language = message_language(db, user.id)
+    key = str(uuid4())
+    report = {
+        "input": {"brand":query.brand,"city":query.city,"country":query.country,
+                  "postal_code":query.postal_code,"language":language,"refresh":True},
+        "current":{"status":"running"},"kimi":{"status":"running"},
+        "comparison":None,
+    }
+    db.add(PilotPriceBenchmark(id=key,user_id=user.id,created_at=now,status="running",result=report))
+    db.commit()
+    tasks.add_task(run_price_benchmark,key,query,language)
+    return {"benchmark_id":key,"status":"running","language":language,
+            "status_url":f"/pilot/prices/benchmarks/{key}"}
+
+
+@router.get("/prices/benchmarks/{benchmark_id}")
+def read_price_benchmark(
+    benchmark_id: UUID,
+    user: PilotUser = Depends(participant),
+    db: Session = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    record = db.scalar(select(PilotPriceBenchmark).where(
+        PilotPriceBenchmark.id == str(benchmark_id),PilotPriceBenchmark.user_id == user.id,
+        PilotPriceBenchmark.created_at >= now - timedelta(hours=1),
+    ))
+    if record is None:
+        raise HTTPException(404, "Price benchmark not found")
+    status = record.status
+    if status == "running" and now - _to_utc(record.created_at) > timedelta(minutes=5):
+        status = "timed_out"
+    return {"benchmark_id":record.id,"status":status,**record.result}
 
 
 @router.get("/prices/{search_id}")

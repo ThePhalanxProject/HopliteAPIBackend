@@ -16,7 +16,7 @@ from models import (
     PilotBurstRefillAlert, PilotLogin, PilotMessagePreference, PilotOfferPreference, PilotPriceSearch, PilotRefillAlert,
     PilotRefillEvent, PilotRefillOracle, PilotSession, PilotSurveyCycle, PilotUsageEvent,
     PilotUsageOracle, PilotUser,
-    PilotAccountResetEvent,
+    PilotAccountResetEvent, PilotPriceBenchmark,
 )
 from pilot_language import header_language
 from pilot_account_history import account_reset_count
@@ -175,6 +175,7 @@ def reset_account(
         db.execute(delete(model).where(model.pack_id == pack.id))
     db.execute(delete(PilotOfferPreference).where(PilotOfferPreference.user_id == user.id))
     db.execute(delete(PilotPriceSearch).where(PilotPriceSearch.user_id == user.id))
+    db.execute(delete(PilotPriceBenchmark).where(PilotPriceBenchmark.user_id == user.id))
     db.merge(PilotSurveyCycle(user_id=user.id, started_at=now))
     pack.started_at = None
     db.flush()
