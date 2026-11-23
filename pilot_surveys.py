@@ -4,12 +4,13 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from pilot_language import account_language
-from models import PilotRefillSurvey, PilotUsageEvent, PilotUsageSurveyTrigger, PilotSurveyCycle, PilotSurveyAdditionalAnswers, PilotSurveyAnswers
+from models import PilotPack, PilotRefillSurvey, PilotUsageEvent, PilotUsageSurveyTrigger, PilotSurveyCycle, PilotSurveyAdditionalAnswers, PilotSurveyAnswers
 
 SURVEY_VERSION = 3
+SURVEY_REQUIRED_USES = 7
 
 LEGACY_SURVEY_QUESTIONS = {
     "en": (
@@ -160,13 +161,29 @@ def current_survey(db, user_id):
     ).limit(1))
 
 
+def survey_usage_count(db, user_id):
+    cycle = db.get(PilotSurveyCycle, user_id)
+    query = select(func.count(PilotUsageEvent.id)).join(
+        PilotPack, PilotUsageEvent.pack_id == PilotPack.id,
+    ).where(PilotPack.user_id == user_id)
+    if cycle is not None:
+        query = query.where(PilotUsageEvent.occurred_at >= cycle.started_at)
+    return db.scalar(query)
+
+
+def survey_is_eligible(db, user_id):
+    return survey_usage_count(db, user_id) >= SURVEY_REQUIRED_USES
+
+
 def pending_survey(db, user_id):
+    if not survey_is_eligible(db, user_id):
+        return None
     survey = current_survey(db, user_id)
     return survey if survey is not None and survey.submitted_at is None else None
 
 
 def activate_usage_survey(db, pack, language):
-    """Activate once after any recorded use; callers hold the pack lock."""
+    """Activate on the seventh use of a reset cycle; callers hold the pack lock."""
     existing = current_survey(db, pack.user_id)
     if existing is not None:
         return
@@ -174,20 +191,20 @@ def activate_usage_survey(db, pack, language):
     query = select(PilotUsageEvent).where(PilotUsageEvent.pack_id == pack.id)
     if cycle is not None:
         query = query.where(PilotUsageEvent.occurred_at >= cycle.started_at)
-    first_use = db.scalar(query.order_by(
+    qualifying_use = db.scalar(query.order_by(
         PilotUsageEvent.occurred_at, PilotUsageEvent.id,
-    ).limit(1))
-    if first_use is None:
+    ).offset(SURVEY_REQUIRED_USES - 1).limit(1))
+    if qualifying_use is None:
         return
     # Existing storage column names are retained for database compatibility.
     # Public trigger fields describe the actual event; refill aliases are null.
     survey = PilotRefillSurvey(
         id=str(uuid4()), user_id=pack.user_id, refill_request_id=str(uuid4()),
-        refilled_at=first_use.occurred_at, version=SURVEY_VERSION, language=language,
+        refilled_at=qualifying_use.occurred_at, version=SURVEY_VERSION, language=language,
     )
     db.add(survey)
     db.flush()
     db.add(PilotUsageSurveyTrigger(
-        survey_id=survey.id, request_id=first_use.request_id, occurred_at=first_use.occurred_at,
+        survey_id=survey.id, request_id=qualifying_use.request_id, occurred_at=qualifying_use.occurred_at,
     ))
     db.flush()

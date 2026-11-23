@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from consumption import _to_utc
 from pilot_oracle import PILOT_LANGUAGE_POLICY_VERSION, OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
-from pilot_surveys import SURVEY_VERSION, LegacySurveyAnswers, VersionTwoSurveyAnswers, SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, save_survey_answers, saved_survey_answers, survey_questions, survey_view
+from pilot_surveys import SURVEY_VERSION, LegacySurveyAnswers, VersionTwoSurveyAnswers, SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, save_survey_answers, saved_survey_answers, survey_is_eligible, survey_questions, survey_view
 from pilot_language import account_language
 from pilot_account_history import USAGE_POINTS, REFILL_POINTS, POINTS_PER_EURO, sync_cashback_history
 from pilot_preferences import preference_scores
@@ -724,6 +724,8 @@ def submit_survey(
         if saved_survey_answers(survey, db).model_dump() != values:
             raise HTTPException(409, "This survey has already been submitted")
         return survey_view(survey, db)
+    if not survey_is_eligible(db, user.id):
+        raise HTTPException(409, "Complete at least 7 uses before submitting this survey")
     if not isinstance(answers, SurveyAnswers):
         raise HTTPException(422, "Answer all six survey questions")
     save_survey_answers(survey, answers, db)

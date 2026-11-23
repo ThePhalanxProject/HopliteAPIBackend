@@ -242,7 +242,7 @@ independent: interest in a device does not imply acceptance of its price.
 Question 5 explicitly covers usage AND demographic data; earlier usage-only
 answers are never reused as consent for this revised question.
 
-After the first recorded usage following enrollment or account reset, the pack
+After the seventh distinct recorded usage following enrollment or account reset, the pack
 response and GET `/pilot/pack` expose `survey_required`, `survey_id`, and
 `survey_url`. Usage retries reuse the invitation. After submission, later usage
 and refills do not activate another survey. Refresh the questions endpoint to
@@ -256,7 +256,7 @@ question text, meanings, and answers. Pending invitations expose version 3.
 Use `/pilot/surveys/questions` for the current question list, rather than deriving
 it from historical answers. Updating the question definitions does not reopen
 completed surveys. The password-protected POST `/pilot/auth/reset` starts a new
-cycle; the first subsequent usage enables a new survey. All previous answers
+cycle; seven subsequent usages enable a new survey. All previous answers
 remain in history, and posting to a survey from an earlier cycle returns 409.
 
 ### Survey database inspection
@@ -429,3 +429,50 @@ Implementation references:
 https://serpapi.com/amazon-search-api
 https://serpapi.com/amazon-domains
 https://serpapi.com/amazon-organic-results
+
+
+### Seven-use survey gate and database-only completion flags
+
+A survey becomes submittable after seven distinct recorded usage events in the
+current account-reset cycle. Uses accumulate across refills. Retried requests
+and refill events do not count as additional uses. Before the seventh use,
+GET `/pilot/surveys/questions` returns `can_submit: false`, `survey_id: null`
+and `survey_url: null`; the six questions remain available for preview.
+Pack responses keep `survey_required: false`. The seventh use activates the
+invitation. Pending invitations created by an older release are also blocked
+until the same seven-use threshold is met, including direct POST attempts.
+Early POST attempts return localized HTTP 409. Previously submitted responses
+are retained, and identical retries of a completed response remain supported.
+After an account reset, seven new uses are required for another submission.
+
+Primio should continue using `can_submit` rather than a locally calculated
+threshold. Any locally written explanation saying one use is required should
+be updated to seven uses. There are no new survey-completion fields in API
+responses and no survey-status API endpoint.
+
+The database view `pilot_user_survey_flags` gives administrators:
+
+- `survey_completed`: true when a survey has been submitted in the current
+  reset cycle. It becomes false after reset until the new survey is submitted.
+- `survey_ever_completed`: true if any historical survey has been submitted;
+  account activity resets do not clear this history.
+- `last_survey_submitted_at`: latest submission timestamp across history.
+- User ID, participant code and registered email for lookup.
+
+These flags are derived by the database from existing submitted timestamps.
+There are no duplicate mutable flags to refresh or backfill. Pending surveys do
+not count as completed, and versions 1, 2 and 3 all count once submitted.
+The view is created at API startup after the tables, using
+`sql/pilot_user_survey_flags.sql`. It can also be applied directly with psql
+without deploying API code. The seven-use API gate requires the code release.
+No survey answers, points, token values or account-reset history are changed.
+
+```sql
+SELECT participant_code, email, survey_completed, survey_ever_completed,
+       last_survey_submitted_at
+FROM pilot_user_survey_flags
+ORDER BY participant_code;
+```
+
+To inspect only one participant, add `WHERE participant_code = 'SMOKE-E'`
+before the ORDER BY clause.
