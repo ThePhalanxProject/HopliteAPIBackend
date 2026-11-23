@@ -5,7 +5,6 @@ import re
 from decimal import Decimal
 from math import isfinite
 from os import getenv
-from time import perf_counter
 from unicodedata import combining, normalize
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -495,13 +494,6 @@ def search_price_offers(brand, language, location, country, *, refresh=False, po
     rows = combined_shopping_results(
         brand, language, location, country, key, refresh=refresh, postal_code=postal_code
     )
-    return price_offers_from_rows(
-        rows, brand, language, location, country, postal_code=postal_code, preferences=preferences,
-    )
-
-
-def price_offers_from_rows(rows, brand, language, location, country, *, postal_code=None, preferences=None):
-    """Apply identical eligibility and ranking rules to a supplied price source."""
     requested_brand = brand_words(brand)
     evidence = location_evidence(location, country, postal_code)
 
@@ -594,13 +586,10 @@ def shopping_message_with_urls(offers, message, language):
     return "\n".join(bullets), valid_names
 
 
-def summarize_price_offers(result, language, country, *, timings=None):
+def summarize_price_offers(result, language, country):
     brand = result["reference_brand"]
     location = result["location"]
-    started = perf_counter()
     offers = resolve_outlet_sites(result["offers"], country, language, location)
-    if timings is not None:
-        timings["outlet_resolution_seconds"] = round(perf_counter() - started, 4)
     result = {**result, "offers": offers, "language": language,
               "language_policy_version": PILOT_LANGUAGE_POLICY_VERSION}
     if not offers:
@@ -611,7 +600,6 @@ def summarize_price_offers(result, language, country, *, timings=None):
         )
         return {**result, "message": message, "message_source": "fallback"}
 
-    started = perf_counter()
     message, source = oracle_copy(
         {
             "task": "shopping_update",
@@ -634,8 +622,6 @@ def summarize_price_offers(result, language, country, *, timings=None):
         None,
     )
     message, used_kimi_names = shopping_message_with_urls(offers, message, language)
-    if timings is not None:
-        timings["summary_seconds"] = round(perf_counter() - started, 4)
     return {
         **result, "message": message,
         "message_source": source if used_kimi_names else "fallback",
