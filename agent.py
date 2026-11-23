@@ -9,6 +9,9 @@ import requests
 HOSTMAN_AGENT_URL = "https://agent.hostman.com/api/v1/cloud-ai/agents/{access_id}/call"
 
 
+PILOT_LANGUAGE_POLICY_VERSION = 2
+
+
 class AgentError(RuntimeError):
     pass
 
@@ -188,11 +191,20 @@ def call_hoplite_agent(payload: Dict[str, Any], test_mode: bool = False, app_mod
     )
 
     if pilot_mode:
+        language_rule = (
+            "The user's saved language flag is fr. Write all consumer-facing prose strictly in French. "
+            if payload.get("language") == "fr" else
+            "The user's saved language flag is en. Write all consumer-facing prose strictly in English. "
+        )
+        language_rule += (
+            "This language flag overrides the country, retailer text, search snippets and style. "
+            "Keep brand names, retailer names, URLs and machine-readable lookup IDs unchanged. "
+        )
         prompt = (
             "You are the Hoplite Oracle. Use only the supplied data. "
             "Do not recalculate estimates or invent prices, dates, or availability. "
             'Return only a JSON object with one key, "message". '
-            f"{instruction}\n\nBACKEND_DATA:\n{json.dumps(payload, default=str)}"
+            f"{language_rule}{instruction}\n\nBACKEND_DATA:\n{json.dumps(payload, default=str)}"
         )
 
     try:

@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from consumption import _to_utc
-from pilot_oracle import OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
+from pilot_oracle import PILOT_LANGUAGE_POLICY_VERSION, OracleMessage, PriceSearch, brand_words, oracle_copy, pilot_prices, stock_message, stock_message_payload
 from pilot_surveys import SURVEY_VERSION, LegacySurveyAnswers, VersionTwoSurveyAnswers, SurveyAnswers, SurveyView, activate_usage_survey, current_survey, pending_survey, save_survey_answers, saved_survey_answers, survey_questions, survey_view
 from pilot_language import account_language
 from pilot_account_history import USAGE_POINTS, REFILL_POINTS, POINTS_PER_EURO, sync_cashback_history
@@ -483,6 +483,7 @@ def read_event_oracle(request_id: UUID, user: PilotUser, db: Session, *, refill:
     current_language = message_language(db, user.id)
     if (
         payload.get("cashback_points_per_euro") != POINTS_PER_EURO
+        or payload.get("language_policy_version") != PILOT_LANGUAGE_POLICY_VERSION
         or payload.get("language") != current_language
     ):
         total = payload["total_points"]
@@ -490,6 +491,7 @@ def read_event_oracle(request_id: UUID, user: PilotUser, db: Session, *, refill:
         payload = {
             **payload,
             "cashback_points_per_euro": POINTS_PER_EURO,
+            "language_policy_version": PILOT_LANGUAGE_POLICY_VERSION,
             "language": current_language,
             "cashback_earned_cents": (total // POINTS_PER_EURO) * 100,
             "cashback_unlocked_cents": (
@@ -590,10 +592,12 @@ def read_price_search(
     language = message_language(db, user.id)
     if (
         search.status == "complete" and search.result
-        and search.result.get("language") != language
+        and (search.result.get("language") != language
+             or search.result.get("language_policy_version") != PILOT_LANGUAGE_POLICY_VERSION)
     ):
         search.result = {
             **search.result, "language": language, "message": None,
+            "language_policy_version": PILOT_LANGUAGE_POLICY_VERSION,
             "message_source": None,
         }
         search.status = "summarizing"

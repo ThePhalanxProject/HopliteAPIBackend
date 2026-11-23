@@ -392,3 +392,40 @@ JOIN pilot_users u ON u.id = r.user_id
 WHERE u.participant_code = 'SMOKE-B'
 ORDER BY r.reset_number;
 ```
+
+### Amazon lookup and Oracle language
+
+Every new price search and explicit price refresh now starts two bounded lookups
+in parallel: the existing any-size Shopping search and an Amazon-specific lookup.
+Both use the existing SERPAPI_API_KEY. The Amazon lookup uses SerpApi's Amazon
+engine for supported local marketplaces, including France, USA, UAE and KSA.
+The app-supplied postcode is used where supported; UAE, KSA and Egypt use the
+app-supplied city. Markets without a supported direct Amazon engine use a
+localized Amazon-targeted Shopping query instead.
+
+Amazon joins the major-retailer priority group. When a qualifying Amazon offer
+exists in the comparison currency, the best such offer is included among the
+five recommendations, alongside up to four other ranked offers. Offers still
+require the same brand, an explicit wash count, a positive listed consumer price,
+and compatible geographic evidence. B2B, Amazon Business, ex-VAT, multipack,
+used and explicitly conflicting-location offers are excluded. The same Amazon
+ASIN found in both sources is deduplicated. Known local Amazon marketplaces
+use their official homepage (for example https://www.amazon.fr/) in Oracle
+bullets. No offer is added if the lookup finds no eligible result. Either lookup
+can fail without discarding successful results from the other. Each new search
+may consume an additional SerpApi search credit.
+
+For all consumer-facing Kimi responses, the saved user language is authoritative:
+fr means French, en means English. Prompt instructions explicitly override the
+country, retailer text, search snippets and style. Brand names, outlet names and
+URLs remain unchanged. Existing stock/usage/refill messages and price summaries
+created before this language policy are regenerated on their next fetch; their
+old text is withheld while refreshing. Saved price offers are reused for this
+language refresh rather than repeating the Amazon or Shopping lookup.
+Primio continues to use the existing language preference endpoint and price
+endpoints; no new request fields are needed.
+
+Implementation references:
+https://serpapi.com/amazon-search-api
+https://serpapi.com/amazon-domains
+https://serpapi.com/amazon-organic-results

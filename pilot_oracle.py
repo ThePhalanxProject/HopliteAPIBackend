@@ -14,7 +14,8 @@ import requests
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from agent import AgentError, call_hoplite_agent
+from agent import AgentError, PILOT_LANGUAGE_POLICY_VERSION, call_hoplite_agent
+from pilot_amazon import AMAZON_MARKETPLACES, amazon_results, amazon_retailer, amazon_country_conflict, offer_identity
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ def stock_message_payload(
 ):
     return {
         "task": "stock_update",
+        "language_policy_version": PILOT_LANGUAGE_POLICY_VERSION,
         "stock_status": pack.stock_status,
         "refill_reason": pack.refill_reason,
         "days_remaining": pack.days_remaining,
@@ -198,9 +200,9 @@ def consumer_offer(row):
 
     metadata = " ".join(
         str(row.get(field) or "")
-        for field in ("source", "title", "price", "snippet", "extensions", "tag", "badge", "details_and_offers")
+        for field in ("source", "title", "price", "snippet", "extensions", "tag", "badge", "details_and_offers", "seller", "seller_name", "offers")
     )
-    if BUSINESS_ONLY.search(metadata):
+    if BUSINESS_ONLY.search(metadata) or "amazon business" in metadata.casefold():
         return None
 
     links = [row.get("link"), row.get("product_link")]
@@ -313,6 +315,8 @@ RETAIL_CHAINS = {
 
 
 def major_retailer(retailer: str | None, country: str) -> bool:
+    if amazon_retailer(retailer, country):
+        return True
     seller = " ".join(brand_words(retailer or ""))
     for chain in RETAIL_CHAINS.get(country, ()):
         name = " ".join(brand_words(chain))
@@ -352,6 +356,8 @@ def outlet_homepage(retailer, country, links):
     seller = " ".join(brand_words(retailer or ""))
     if not seller:
         return None
+    if amazon_retailer(retailer, country) and country in AMAZON_MARKETPLACES:
+        return f"https://www.{AMAZON_MARKETPLACES[country]}/"
     for name, homepage in OFFICIAL_RETAILER_SITES.get(country, {}).items():
         if seller == name or seller.startswith(name + " "):
             return homepage
@@ -458,12 +464,35 @@ def resolve_outlet_sites(offers, country, language, location):
     ]
 
 
+def combined_shopping_results(brand, language, location, country, key, *, refresh=False, postal_code=None):
+    """Always attempt the general and Amazon searches concurrently."""
+    rows, errors = [], []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        general = executor.submit(
+            shopping_results, shopping_query(brand, language, country),
+            location, country, language, key, refresh=refresh,
+        )
+        amazon = executor.submit(
+            amazon_results, brand, language, location, country, key,
+            refresh=refresh, postal_code=postal_code,
+        )
+        for name, future in (("shopping", general), ("Amazon", amazon)):
+            try:
+                rows.extend(future.result())
+            except HTTPException as exc:
+                errors.append(exc)
+                logger.warning("%s lookup unavailable for country %s", name, country)
+    if len(errors) == 2:
+        raise errors[0]
+    return rows
+
+
 def search_price_offers(brand, language, location, country, *, refresh=False, postal_code=None, preferences=None):
     key = getenv("SERPAPI_API_KEY")
     if not key:
         raise HTTPException(503, "Shopping search is not configured")
-    rows = shopping_results(
-        shopping_query(brand, language, country), location, country, language, key, refresh=refresh
+    rows = combined_shopping_results(
+        brand, language, location, country, key, refresh=refresh, postal_code=postal_code
     )
     requested_brand = brand_words(brand)
     evidence = location_evidence(location, country, postal_code)
@@ -488,10 +517,12 @@ def search_price_offers(brand, language, location, country, *, refresh=False, po
             or MULTIPACK.search(title)
             or not matches_brand(row, title, requested_brand)
             or conflicts_with_location(row, evidence)
+            or amazon_country_conflict(row, country)
         ):
             continue
         retailer, link = consumer
-        if link in seen_links:
+        identity = offer_identity(link)
+        if identity in seen_links:
             continue
         counts = set(WASH_COUNT.findall(title))
         currency = re.sub(r"[\d.,\s]", "", price)
@@ -499,7 +530,7 @@ def search_price_offers(brand, language, location, country, *, refresh=False, po
         if len(counts) != 1 or not currency:
             continue
         washes = int(counts.pop())
-        seen_links.add(link)
+        seen_links.add(identity)
         offers.append({
             "title": title, "retailer": retailer, "listed_price": price,
             "wash_count": washes, "currency": currency, "url": link,
@@ -509,16 +540,19 @@ def search_price_offers(brand, language, location, country, *, refresh=False, po
 
     # Price ranking is meaningful only within a common currency.
     currency = max((o["currency"] for o in offers), key=lambda c: sum(o["currency"] == c for o in offers), default=None)
-    offers = sorted(
-        (o for o in offers if o["currency"] == currency),
-        key=lambda offer: (
+    def rank(offer):
+        return (
             not major_retailer(offer["retailer"], country),
             offer["price_per_wash"] / (1 + Decimal(str(min(
                 (preferences or {}).get(" ".join(brand_words(offer["retailer"] or "")), 0) * 0.05, 0.15
             )))),
             offer["price_per_wash"],
-        ),
-    )[:5]
+        )
+    ranked = sorted((o for o in offers if o["currency"] == currency), key=rank)
+    offers = ranked[:5]
+    best_amazon = next((offer for offer in ranked if amazon_retailer(offer["retailer"], country)), None)
+    if best_amazon is not None and best_amazon not in offers:
+        offers = sorted([*offers[:4], best_amazon], key=rank)
     for offer in offers:
         offer["price_per_wash"] = float(round(offer["price_per_wash"], 4))
         offer["preference_score"] = (preferences or {}).get(" ".join(brand_words(offer["retailer"] or "")), 0)
@@ -556,7 +590,8 @@ def summarize_price_offers(result, language, country):
     brand = result["reference_brand"]
     location = result["location"]
     offers = resolve_outlet_sites(result["offers"], country, language, location)
-    result = {**result, "offers": offers, "language": language}
+    result = {**result, "offers": offers, "language": language,
+              "language_policy_version": PILOT_LANGUAGE_POLICY_VERSION}
     if not offers:
         message = (
             f"Je n’ai trouvé aucune offre {brand} correspondant à votre recherche à {location} ({country.upper()})."
