@@ -47,9 +47,10 @@ class SurveyTests(unittest.TestCase):
 
     def activate(self, headers):
         self.assertEqual(self.client.post('/pilot/pack/start', headers=headers).status_code, 200)
-        r = self.client.post('/pilot/pack/usage?defer_oracle=true', headers=headers,
-                             json={'request_id': str(uuid4())})
-        self.assertEqual(r.status_code, 200, r.text)
+        for _ in range(7):
+            r = self.client.post('/pilot/pack/usage?defer_oracle=true', headers=headers,
+                                 json={'request_id': str(uuid4())})
+            self.assertEqual(r.status_code, 200, r.text)
         return self.client.get('/pilot/surveys/questions', headers=headers).json()
 
     def test_six_questions_localization_storage_and_isolation(self):
@@ -124,7 +125,7 @@ class SurveyTests(unittest.TestCase):
             survey_id = str(uuid4())
             db.add(PilotRefillSurvey(id=survey_id, user_id=user_id, refill_request_id=str(uuid4()),
                 refilled_at=datetime.now(timezone.utc), language='en', version=1))
-        q = self.client.get('/pilot/surveys/questions', headers=h).json()
+        q = self.activate(h)
         self.assertEqual(q['survey_id'], survey_id)
         self.assertEqual(q['version'], 3)
         self.assertEqual(len(self.client.get(q['survey_url'], headers=h).json()['questions']), 6)

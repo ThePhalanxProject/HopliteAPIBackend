@@ -2,6 +2,7 @@
 from sqlalchemy import func, literal, select, union_all
 
 from models import PilotAccountResetEvent, PilotCashbackMilestone, PilotRefillEvent, PilotUsageEvent
+from pilot_rewards import sync_reward_account
 
 USAGE_POINTS = 5
 REFILL_POINTS = 10
@@ -56,3 +57,4 @@ def sync_cashback_history(db, pack, points, now, *, current_request_id=None):
             ))
             last_milestone = number
         db.flush()
+        sync_reward_account(db, pack.user_id)
